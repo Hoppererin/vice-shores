@@ -1,8 +1,12 @@
-// Vice Shores — an original top-down 2D open-world crime game in the spirit
-// of GTA (this repo's game/): Rico Vega runs four jobs for Mama Lou across a
-// seeded coastal city, steals cars, dodges the Vice Shores PD, then roams
-// free. Plain static files a desktop browser loads offline (game/index.html
-// and its ES modules, no library and no network request).
+// Vice Shores — a gta6-01 entry (Node 22, standard library only): the game is this directory's
+// game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
+// modules, no library and no network request), and the program hands it in. It copies game/ and
+// screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
+// judge reads, with the vendored make.fun library. The game itself is Vice Shores, an original
+// top-down 2D open-world crime game: Rico Vega drives, steals cars, dodges the Vice Shores PD
+// and runs four jobs for the fixer Mama Lou across a living coastal city — traffic, pedestrians,
+// a wanted level, missions, a HUD with minimap, synthesized sound and a save. Screenshots live
+// in screenshots/ (the first by name is the cover).
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
