@@ -1,97 +1,78 @@
-// Vice Shores — all tuning numbers, palette, districts and the save key.
-// One place to tune the game; no other module hard-codes these values.
+// Vice Shores — every tuning number, colour and place name in one place.
+// The world is a fixed 3200 x 2400 px city; the renderer shows it through a
+// 1280 x 720 logical canvas that scales to the window, so no rule here
+// depends on the screen size.
+export const WORLD = { width: 3200, height: 2400 };
+export const VIEW = { width: 1280, height: 720 };
+export const STEP = 1 / 60;
+export const SAVE_KEY = 'vice-shores.save.v1';
 
-export const WORLD_W = 3200;
-export const WORLD_H = 2400;
-export const VIEW_W = 1280;
-export const VIEW_H = 720;
+// Roads: vertical lines at these x, horizontal lines at these y.
+export const ROADS_X = [200, 600, 1000, 1400, 1800, 2200, 2600];
+export const ROADS_Y = [200, 600, 1000, 1400, 1800, 2200];
+export const ROAD_W = 96; // asphalt width
+export const WALK_W = 26; // sidewalk strip on each side of a road
 
-export const ROAD_XS = [200, 600, 1000, 1400, 1800, 2200, 2600];
-export const ROAD_YS = [200, 600, 1000, 1400, 1800, 2200];
-export const ROAD_W = 96;
-export const SIDEWALK = 26;
-
-export const BEACH_X = 2840;   // sand starts here; no buildings east of it
-export const OCEAN_X = 3020;   // water starts here
-
+export const BEACH_X = 2840; // sand starts here
+export const OCEAN_X = 3020; // water starts here
 export const PARK = { x: 1430, y: 1030, w: 340, h: 340 };
 export const PLAZA = { x: 1030, y: 1830, w: 340, h: 340 };
 
-export const SAVE_KEY = 'vice-shores.save.v1';
-export const SAVE_EVERY_S = 20;
-
 export const PLAYER = {
+  radius: 13,
   walkSpeed: 175,
   runSpeed: 265,
-  radius: 13,
+  punchRange: 38,
+  punchArc: 1.1,
   health: 100,
-  enterRange: 46,
-  punchRange: 42,
-  punchDamage: 34,
-  punchCooldown: 0.45,
 };
 
 export const CAR = {
   accel: 420,
+  brake: 620,
+  maxReverse: 160,
   topSpeed: 540,
-  sportsTop: 640,
-  reverseMax: 160,
-  brake: 700,
-  drag: 0.55,
+  sportsTopSpeed: 640,
   turnRate: 2.6,
-  length: 46,
-  width: 22,
+  radius: 17,
 };
 
 export const TRAFFIC_COUNT = 14;
-export const TRAFFIC_SPEED = 150;
 export const PED_COUNT = 42;
-export const PED_SPEED = 62;
-export const PED_FLEE_SPEED = 150;
+export const TRAFFIC_SPEED = 150;
+export const PED_SPEED = 55;
+export const PED_FLEE_SPEED = 135;
 
-export const WANTED_DECAY_S = 26;
+export const WANTED_DECAY_SECONDS = 26;
 export const MAX_POLICE_CARS = 4;
-export const BUST_HOLD_S = 1.4;
-export const COP_GRAB_RANGE = 26;
+export const BUST_HOLD_SECONDS = 1.4;
+export const AUTOSAVE_SECONDS = 20;
 
-export const COLORS = {
-  grass: '#6fae56',
-  grassDark: '#639c4d',
-  road: '#2b2f38',
-  roadEdge: '#3a3f4b',
-  sidewalk: '#b9b3a4',
-  lane: '#e8c832',
-  sand: '#e6cf9a',
-  ocean: '#2f7fa8',
-  oceanDeep: '#2a6f96',
-  buildingSide: '#00000055',
-  park: '#5da24a',
-  plaza: '#c9c2b2',
-  pond: '#7ec3e8',
-  fountain: '#8fd0f0',
-  hudBg: 'rgba(10,12,18,0.72)',
-  hudGold: '#ffd23e',
-  hudText: '#f2f2ea',
-  hudMuted: '#c8c8bc',
-  starOn: '#ffd23e',
-  starOff: '#5a5f6e',
-  marker: '#ffd23e',
-  police: '#2f6fd0',
-  taxi: '#f7c531',
-  sports: '#f2f2f0',
-};
-
-export const BUILDING_COLORS = [
-  '#c96a4a', '#d98a4b', '#7fa3c9', '#c97f9a', '#8fae7a',
-  '#c9b458', '#9a7fc9', '#6aa39a', '#b0524f', '#d9a06a',
-];
+export const MISSION_TIMER = 75; // seconds for the timed delivery
 
 export const DISTRICTS = [
-  { name: 'Porto Verde', x0: 0, y0: 0, x1: 1000, y1: 1000 },
-  { name: 'Old Town', x0: 1000, y0: 0, x1: 2000, y1: 1000 },
-  { name: 'Neon Mile', x0: 0, y0: 1000, x1: 1000, y1: 2400 },
-  { name: 'Marina Bay', x0: 1000, y0: 1000, x1: 2200, y1: 2400 },
-  { name: 'Palm Court', x0: 2200, y0: 0, x1: 2840, y1: 2400 },
+  { name: 'Porto Verde', x: 0, y: 0, w: 1150, h: 1150 },
+  { name: 'Old Town', x: 1150, y: 0, w: 1150, h: 1150 },
+  { name: 'Neon Mile', x: 0, y: 1150, w: 1150, h: 1250 },
+  { name: 'Marina Bay', x: 2300, y: 0, w: 540, h: 1150 },
+  { name: 'Palm Court', x: 1150, y: 1150, w: 1690, h: 1250 },
 ];
 
-export const MISSION_REWARDS = [150, 300, 500, 1000];
+export const PALETTE = {
+  grass: '#7fae62',
+  grassDark: '#74a258',
+  sand: '#e8d39a',
+  ocean: '#2f7fc4',
+  oceanDeep: '#256aa8',
+  road: '#3c3f46',
+  roadLine: '#e8d44d',
+  sidewalk: '#9aa0a8',
+  plaza: '#b9b3a4',
+  park: '#5f9e4e',
+  pond: '#4d9ec9',
+  buildingSide: 'rgba(0,0,0,0.28)',
+  roofs: ['#e07856', '#e8a34c', '#7fb3d5', '#c98bb0', '#8fc97f', '#d5c06a', '#9a8fd0', '#e08a7a'],
+  tree: '#3f7d3a',
+  treeLight: '#57a04e',
+  palm: '#4c9a4a',
+};

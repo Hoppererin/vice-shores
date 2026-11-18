@@ -1,122 +1,109 @@
-// Synthesized WebAudio: engine hum, siren, jingles and a quiet bass loop.
-// Every call is guarded — with no AudioContext (or before any key press)
-// the game simply stays silent and keeps running.
+// All sound is synthesized with WebAudio: no audio files, no network.
+// Every call is guarded, so the game runs fine with audio off, blocked, or
+// missing entirely. Audio only starts after a key press (the browser's
+// autoplay rule), from the main loop's first user gesture.
 
 export function createAudio() {
-  const audio = {
-    ctx: null,
-    master: null,
-    engineOsc: null,
-    engineGain: null,
-    sirenOsc: null,
-    sirenGain: null,
-    sirenTimer: 0,
-    musicTimer: 0,
-    musicStep: 0,
-    enabled: false,
-    ensure() {
-      if (audio.ctx || typeof window === 'undefined') return;
+  let ctx = null;
+  let engineOsc = null;
+  let engineGain = null;
+  let sirenOsc = null;
+  let sirenGain = null;
+  let musicTimer = 0;
+  let musicStep = 0;
+  let started = false;
+
+  function ensure() {
+    if (ctx) return true;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return false;
+      ctx = new AudioCtx();
+      engineOsc = ctx.createOscillator();
+      engineOsc.type = 'sawtooth';
+      engineOsc.frequency.value = 50;
+      engineGain = ctx.createGain();
+      engineGain.gain.value = 0;
+      engineOsc.connect(engineGain).connect(ctx.destination);
+      engineOsc.start();
+      sirenOsc = ctx.createOscillator();
+      sirenOsc.type = 'sine';
+      sirenOsc.frequency.value = 700;
+      sirenGain = ctx.createGain();
+      sirenGain.gain.value = 0;
+      sirenOsc.connect(sirenGain).connect(ctx.destination);
+      sirenOsc.start();
+      started = true;
+      return true;
+    } catch {
+      ctx = null;
+      return false;
+    }
+  }
+
+  function blip(freq, dur, type, vol, slideTo) {
+    if (!ctx) return;
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime);
+      if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, ctx.currentTime + dur);
+      gain.gain.setValueAtTime(vol || 0.12, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + dur);
+    } catch {
+      // A failed blip is never worth stopping the game for.
+    }
+  }
+
+  // Quiet walking bassline: A minor, one note every half second.
+  const BASSLINE = [55, 55, 65.41, 55, 49, 55, 82.41, 73.42];
+
+  return {
+    get ready() {
+      return started;
+    },
+    unlock() {
+      if (ensure() && ctx.state === 'suspended') ctx.resume().catch(() => {});
+    },
+    // Called every frame with the driving speed (0 on foot) and wanted level.
+    update(dt, speed, wanted) {
+      if (!ctx) return;
       try {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) return;
-        audio.ctx = new AC();
-        audio.master = audio.ctx.createGain();
-        audio.master.gain.value = 0.5;
-        audio.master.connect(audio.ctx.destination);
-        audio.enabled = true;
+        const driving = speed > 1;
+        engineGain.gain.value = driving ? 0.035 + Math.min(0.05, Math.abs(speed) / 9000) : 0;
+        engineOsc.frequency.value = 46 + Math.abs(speed) * 0.14;
+        if (wanted > 0) {
+          sirenGain.gain.value = 0.028;
+          sirenOsc.frequency.value = (Math.floor(performance.now() / 450) % 2 === 0) ? 660 : 880;
+        } else {
+          sirenGain.gain.value = 0;
+        }
+        musicTimer -= dt;
+        if (musicTimer <= 0) {
+          musicTimer = 0.5;
+          blip(BASSLINE[musicStep % BASSLINE.length], 0.42, 'triangle', 0.045);
+          musicStep += 1;
+        }
       } catch {
-        audio.ctx = null;
+        // Keep the game running if the audio graph misbehaves.
       }
     },
-    resume() {
-      audio.ensure();
-      if (audio.ctx && audio.ctx.state === 'suspended') {
-        audio.ctx.resume().catch(() => {});
-      }
-    },
-    tone(freq, dur, type, vol, when = 0, slideTo = null) {
-      if (!audio.ctx || !audio.enabled) return;
-      try {
-        const t0 = audio.ctx.currentTime + when;
-        const osc = audio.ctx.createOscillator();
-        const g = audio.ctx.createGain();
-        osc.type = type || 'sine';
-        osc.frequency.setValueAtTime(freq, t0);
-        if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
-        g.gain.setValueAtTime(vol, t0);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-        osc.connect(g);
-        g.connect(audio.master);
-        osc.start(t0);
-        osc.stop(t0 + dur + 0.05);
-      } catch { /* silent */ }
-    },
-    pickup() { audio.tone(660, 0.12, 'sine', 0.25); audio.tone(990, 0.18, 'sine', 0.25, 0.09); },
+    pickup() { blip(880, 0.12, 'sine', 0.12, 1320); },
     cash() {
-      audio.tone(880, 0.1, 'triangle', 0.3);
-      audio.tone(1108, 0.1, 'triangle', 0.3, 0.08);
-      audio.tone(1318, 0.22, 'triangle', 0.3, 0.16);
+      blip(660, 0.1, 'sine', 0.12);
+      setTimeout(() => blip(990, 0.16, 'sine', 0.12), 90);
     },
-    punch() { audio.tone(180, 0.09, 'square', 0.3, 0, 70); },
-    crash() { audio.tone(120, 0.25, 'sawtooth', 0.35, 0, 45); },
+    punch() { blip(140, 0.09, 'square', 0.1, 70); },
+    crash() { blip(90, 0.25, 'sawtooth', 0.14, 45); },
     mission() {
-      [523, 659, 784, 1046].forEach((f, i) => audio.tone(f, 0.16, 'triangle', 0.3, i * 0.11));
+      [523, 659, 784].forEach((f, i) => setTimeout(() => blip(f, 0.18, 'sine', 0.12), i * 110));
     },
-    busted() { [392, 330, 262].forEach((f, i) => audio.tone(f, 0.3, 'sawtooth', 0.25, i * 0.22)); },
-    engine(speedNorm) {
-      if (!audio.ctx || !audio.enabled) return;
-      try {
-        if (!audio.engineOsc) {
-          audio.engineOsc = audio.ctx.createOscillator();
-          audio.engineGain = audio.ctx.createGain();
-          audio.engineOsc.type = 'sawtooth';
-          audio.engineOsc.frequency.value = 60;
-          audio.engineGain.gain.value = 0;
-          audio.engineOsc.connect(audio.engineGain);
-          audio.engineGain.connect(audio.master);
-          audio.engineOsc.start();
-        }
-        const target = speedNorm > 0.02 ? 0.05 + speedNorm * 0.05 : 0;
-        audio.engineGain.gain.setTargetAtTime(target, audio.ctx.currentTime, 0.1);
-        audio.engineOsc.frequency.setTargetAtTime(55 + speedNorm * 140, audio.ctx.currentTime, 0.1);
-      } catch { /* silent */ }
-    },
-    siren(on, dt) {
-      if (!audio.ctx || !audio.enabled) return;
-      try {
-        if (on && !audio.sirenOsc) {
-          audio.sirenOsc = audio.ctx.createOscillator();
-          audio.sirenGain = audio.ctx.createGain();
-          audio.sirenOsc.type = 'sine';
-          audio.sirenGain.gain.value = 0.045;
-          audio.sirenOsc.connect(audio.sirenGain);
-          audio.sirenGain.connect(audio.master);
-          audio.sirenOsc.start();
-        }
-        if (!on && audio.sirenOsc) {
-          audio.sirenOsc.stop();
-          audio.sirenOsc = null;
-          audio.sirenGain = null;
-          return;
-        }
-        if (audio.sirenOsc) {
-          audio.sirenTimer += dt;
-          const f = 700 + 320 * Math.sin(audio.sirenTimer * 4.2);
-          audio.sirenOsc.frequency.setTargetAtTime(f, audio.ctx.currentTime, 0.05);
-        }
-      } catch { /* silent */ }
-    },
-    // Quiet two-note bass loop, stepped from the game loop.
-    music(dt) {
-      if (!audio.ctx || !audio.enabled) return;
-      audio.musicTimer += dt;
-      if (audio.musicTimer < 0.42) return;
-      audio.musicTimer = 0;
-      const bass = [55, 55, 65.4, 49, 55, 55, 73.4, 65.4];
-      const f = bass[audio.musicStep % bass.length];
-      audio.musicStep++;
-      audio.tone(f, 0.4, 'triangle', 0.07);
+    busted() {
+      [392, 311, 233].forEach((f, i) => setTimeout(() => blip(f, 0.25, 'triangle', 0.12), i * 160));
     },
   };
-  return audio;
 }

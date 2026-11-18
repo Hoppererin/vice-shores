@@ -1,312 +1,256 @@
 // The world state and the one fixed-step function tying the systems
-// together. Everything the game does each tick flows through stepWorld:
-// input -> player -> traffic -> pedestrians -> police -> missions -> save.
-
-import { WORLD_W, WORLD_H, PLAYER, SAVE_KEY, SAVE_EVERY_S, TRAFFIC_COUNT, PED_COUNT } from './config.js';
-import { makeRng, clamp, dist } from './random.js';
-import { buildCity, randomRoadPoint, randomSidewalkPoint, nearestNode } from './city.js';
+// together: the player on foot or in a car, traffic, pedestrians, police,
+// missions and the camera. No drawing and no browser in here, so the
+// headless smoke test can drive it directly.
 import {
-  makeCar, makePedestrian, makePlayer,
-  stepPlayerOnFoot, stepPlayerCar, stepTrafficCar, stepPedestrian, knockDown,
+  BEACH_X, CAR, PED_COUNT, PLAYER, STEP, TRAFFIC_COUNT, VIEW, WORLD,
+} from './config.js';
+import { createRandom, clamp, dist } from './random.js';
+import { collideBuildings, generateCity, nearestNode, randomRoadPoint, randomSidewalkPoint } from './city.js';
+import {
+  drivePlayerCar, knockDown, makeCar, makePedestrian, makePlayer, resolveCarCollisions,
+  stepPedestrian, stepPlayerOnFoot, stepTrafficCar,
 } from './entities.js';
-import { stepPolice, addWanted, clearPolice } from './police.js';
-import { startMission, stepMission, onEnterCar, currentMission } from './missions.js';
+import { addWanted, stepPolice } from './police.js';
+import { SPOTS, startMission, updateMission } from './missions.js';
+
+const TRAFFIC_MODELS = ['sedan', 'coupe', 'van', 'pickup'];
 
 export function createWorld(seed) {
-  const rng = makeRng(seed);
-  const city = buildCity(seed);
+  const rng = createRandom(seed);
+  const city = generateCity(rng);
+  const player = makePlayer(1061, 1450);
+
+  const cars = [];
+  for (let i = 0; i < TRAFFIC_COUNT; i += 1) {
+    const spot = randomRoadPoint(rng);
+    const car = makeCar(rng.pick(TRAFFIC_MODELS), spot.x, spot.y, 0, rng);
+    car.driver = 'traffic';
+    car.node = nearestNode(city, spot.x, spot.y);
+    const node = city.nodes[car.node];
+    car.angle = Math.atan2(node.y - car.y, node.x - car.x);
+    car.speed = 60;
+    cars.push(car);
+  }
+  const taxi = makeCar('taxi', SPOTS.taxi.x, SPOTS.taxi.y, -Math.PI / 2, rng);
+  const sportsCar = makeCar('sports', SPOTS.mallLot.x, SPOTS.mallLot.y, 0, rng);
+  cars.push(taxi, sportsCar);
+
+  const peds = [];
+  for (let i = 0; i < PED_COUNT; i += 1) {
+    const spot = randomSidewalkPoint(rng);
+    peds.push(makePedestrian(spot.x, spot.y, rng));
+  }
+
   const world = {
     seed,
     rng,
     city,
-    cityW: WORLD_W,
-    cityH: WORLD_H,
+    state: 'title', // title | play | pause | busted | wasted
     time: 0,
-    state: 'title',           // title | play | pause | busted | wasted
-    player: makePlayer(1200, 1960),
-    cars: [],
-    peds: [],
+    player,
+    cars,
+    taxi,
+    sportsCar,
+    peds,
     policeCars: [],
     footCops: [],
     wanted: 0,
-    wantedTimer: 0,
-    ramCooldown: 0,
-    lastCrimeAt: -100,
+    quietTimer: 0,
     missionIndex: 0,
     missionStep: 0,
     missionTimer: 0,
     missionFailed: false,
+    marker: null,
+    dialogue: { lines: [], index: 0, timer: 0 },
+    camera: { x: 0, y: 0 },
     jobsDone: 0,
-    dialogue: [],
-    dialogueTimer: 0,
-    dialogueLine: 0,
-    events: [],
+    save: null,
     saveDue: false,
-    saveTimer: 0,
-    camera: { x: 1200, y: 1960 },
-    // Mission cars, kept as references so missions can find them.
-    taxi: null,
-    sportsCar: null,
+    events: {},
   };
-
-  // The mission taxi by the plaza (parked on the road just east of it, so
-  // driving off is down a clear road) and the white sports car in the mall lot.
-  world.taxi = makeCar(1400, 2000, -Math.PI / 2, 'taxi', null);
-  world.sportsCar = makeCar(2200, 1400, Math.PI, 'sports', null);
-  world.cars.push(world.taxi, world.sportsCar);
-
-  // Traffic: seeded models on the road graph, spread across the city.
-  const models = ['sedan', 'sedan', 'coupe', 'taxi', 'van', 'sports', 'pickup'];
-  for (let i = 0; i < TRAFFIC_COUNT; i++) {
-    const spot = randomRoadPoint(city, rng);
-    const car = makeCar(spot.x, spot.y, rng.range(0, Math.PI * 2), models[i % models.length], 'traffic');
-    car.node = nearestNode(city, spot.x, spot.y);
-    car.prevNode = car.node;
-    world.cars.push(car);
-  }
-
-  // Pedestrians on the sidewalks.
-  for (let i = 0; i < PED_COUNT; i++) {
-    const spot = randomSidewalkPoint(city, rng);
-    world.peds.push(makePedestrian(spot.x, spot.y, rng));
-  }
-
+  startMission(world, 0);
+  updateCamera(world);
   return world;
 }
 
-// --- Entering / exiting cars ---------------------------------------------
-
 export function nearestCar(world, x, y, maxDist) {
+  const limit = maxDist || 46;
   let best = null;
-  let bestD = maxDist;
+  let bestD = limit;
   for (const car of world.cars) {
+    if (car.driver === 'police') continue;
     const d = dist(x, y, car.x, car.y);
-    if (d < bestD) { bestD = d; best = car; }
+    if (d < bestD) {
+      bestD = d;
+      best = car;
+    }
   }
   return best;
 }
 
+// E: step out of the car, or step into the nearest car. Taking a parked car
+// or yanking a driver out is a crime.
 export function tryEnterCar(world) {
-  const p = world.player;
-  if (p.car) return false;
-  const car = nearestCar(world, p.x, p.y, PLAYER.enterRange);
-  if (!car) return false;
-  if (car.driver === 'traffic') {
-    // Yanking a driver out is a crime; the driver becomes a pedestrian.
-    addWanted(world, 1);
-    world.events.push({ type: 'punch' });
-    const driver = makePedestrian(car.x + 30, car.y, world.rng);
-    world.peds.push(driver);
-  } else if (car.driver === null) {
-    // Taking a parked car is a crime too.
-    addWanted(world, 1);
-  } else if (car.driver === 'police') {
-    return false;
+  const player = world.player;
+  if (player.car) {
+    const car = player.car;
+    const side = car.angle + Math.PI / 2;
+    player.x = car.x + Math.cos(side) * 30;
+    player.y = car.y + Math.sin(side) * 30;
+    player.x = clamp(player.x, 12, WORLD.width - 12);
+    player.y = clamp(player.y, 12, WORLD.height - 12);
+    player.angle = car.angle;
+    player.car = null;
+    car.driver = 'parked';
+    car.speed *= 0.3;
+    return true;
   }
+  const car = nearestCar(world, player.x, player.y, 46);
+  if (!car) return false;
+  player.car = car;
   car.driver = 'player';
-  car.playerCar = true;
-  car.node = -1;
-  p.car = car;
-  p.x = car.x;
-  p.y = car.y;
-  onEnterCar(world, car);
+  player.x = car.x;
+  player.y = car.y;
+  player.angle = car.angle;
+  if (car.driver === 'player') addWanted(world, 1);
   return true;
 }
 
-export function exitCar(world) {
-  const p = world.player;
-  const car = p.car;
-  if (!car) return;
-  car.driver = null;
-  car.playerCar = false;
-  car.speed = 0;
-  // Step out to the car's left side.
-  const side = car.angle + Math.PI / 2;
-  p.x = car.x + Math.cos(side) * 30;
-  p.y = car.y + Math.sin(side) * 30;
-  p.car = null;
-}
-
-// --- Punching --------------------------------------------------------------
-
+// F: punch whatever is in front of the player. Punching a pedestrian is a
+// crime; punching a cop is a bigger one.
 export function tryPunch(world) {
-  const p = world.player;
-  if (p.car || p.punchTimer > 0) return;
-  p.punchTimer = PLAYER.punchCooldown;
-  p.punchAnim = 0.25;
-  world.events.push({ type: 'punch' });
-  const reach = PLAYER.punchRange;
-  const fx = p.x + Math.cos(p.angle) * 26;
-  const fy = p.y + Math.sin(p.angle) * 26;
+  const player = world.player;
+  if (player.car || player.punchCooldown > 0) return false;
+  player.punchCooldown = 0.45;
+  let hit = false;
   for (const ped of world.peds) {
     if (ped.state === 'down') continue;
-    if (dist(fx, fy, ped.x, ped.y) < reach) {
-      knockDown(ped, 5);
-      addWanted(world, 1);
-      return;
-    }
+    const d = dist(player.x, player.y, ped.x, ped.y);
+    if (d > PLAYER.punchRange) continue;
+    const want = Math.atan2(ped.y - player.y, ped.x - player.x);
+    let diff = want - player.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.abs(diff) > PLAYER.punchArc) continue;
+    knockDown(ped, 4);
+    addWanted(world, 1);
+    hit = true;
   }
   for (const cop of world.footCops) {
-    if (dist(fx, fy, cop.x, cop.y) < reach + 6) {
-      addWanted(world, 2);
-      cop.holdTimer = 0;
-      cop.x += Math.cos(p.angle) * 60;
-      cop.y += Math.sin(p.angle) * 60;
-      return;
-    }
+    if (cop.state === 'down') continue;
+    const d = dist(player.x, player.y, cop.x, cop.y);
+    if (d > PLAYER.punchRange) continue;
+    cop.state = 'down';
+    cop.downTimer = 3;
+    cop.grabTimer = 0;
+    addWanted(world, 2);
+    hit = true;
   }
+  if (hit) world.events.punch = true;
+  return hit;
 }
 
-// --- Car vs car ------------------------------------------------------------
+function stepPlayerCar(world, input, dt) {
+  const player = world.player;
+  const car = player.car;
+  drivePlayerCar(car, input, dt);
+  const speedBefore = Math.abs(car.speed);
+  if (collideBuildings(world.city, car, CAR.radius)) {
+    if (speedBefore > 220) world.events.crash = true;
+    // A hard hit costs real speed; brushing a wall while sliding along it
+    // only scrubs a little, or a nudge traps the car against the wall.
+    car.speed *= speedBefore > 220 ? 0.6 : speedBefore > 60 ? 0.9 : 0.97;
+  }
+  player.x = car.x;
+  player.y = car.y;
+  player.angle = car.angle;
 
-function stepCarCollisions(world) {
-  const cars = world.cars;
-  for (let i = 0; i < cars.length; i++) {
-    for (let j = i + 1; j < cars.length; j++) {
-      const a = cars[i];
-      const b = cars[j];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.hypot(dx, dy);
-      const min = (a.model.len + b.model.len) * 0.32;
-      if (d >= min || d < 0.01) continue;
-      const push = (min - d) / 2;
-      const nx = dx / d;
-      const ny = dy / d;
-      a.x -= nx * push;
-      a.y -= ny * push;
-      b.x += nx * push;
-      b.y += ny * push;
-      const aFast = Math.abs(a.speed) > 120;
-      const bFast = Math.abs(b.speed) > 120;
-      if (aFast || bFast) {
-        a.speed *= 0.55;
-        b.speed *= 0.55;
-        world.events.push({ type: 'crash' });
+  // Pedestrians: a fast car knocks them down (a crime) and makes the rest flee.
+  for (const ped of world.peds) {
+    const d = dist(car.x, car.y, ped.x, ped.y);
+    if (Math.abs(car.speed) > 200 && d < 26 && ped.state !== 'down') {
+      knockDown(ped, 5);
+      addWanted(world, 1);
+      world.events.crash = true;
+    } else if (Math.abs(car.speed) > 250 && d < 220 && ped.state === 'walk') {
+      ped.state = 'flee';
+      ped.danger = car;
+      ped.fleeTimer = 2;
+    }
+  }
+  if (input.wasPressed('KeyE')) tryEnterCar(world);
+}
+
+function stepPlayerWalking(world, input, dt) {
+  const player = world.player;
+  stepPlayerOnFoot(player, input, dt, world.city);
+  if (input.wasPressed('KeyE')) tryEnterCar(world);
+  else if (input.wasPressed('KeyF')) tryPunch(world);
+  // Traffic can run the player down on foot.
+  if (player.hurtCooldown <= 0) {
+    for (const car of world.cars) {
+      if (car.driver === 'parked') continue;
+      if (dist(car.x, car.y, player.x, player.y) < 26 && Math.abs(car.speed) > 60) {
+        player.health -= 5;
+        player.hurtCooldown = 1;
+        world.events.crash = true;
+        const away = Math.atan2(player.y - car.y, player.x - car.x);
+        player.x += Math.cos(away) * 30;
+        player.y += Math.sin(away) * 30;
+        if (player.health <= 0) world.state = 'wasted';
+        break;
       }
     }
   }
 }
 
-// A fast player car knocking a pedestrian down is a crime.
-function stepCarVsPeds(world) {
-  const car = world.player.car;
-  if (!car || Math.abs(car.speed) < 200) return;
-  for (const ped of world.peds) {
-    if (ped.state === 'down') continue;
-    if (dist(ped.x, ped.y, car.x, car.y) < 30) {
-      knockDown(ped, 6);
-      addWanted(world, 1);
-    }
-  }
+function updateCamera(world) {
+  world.camera.x = clamp(world.player.x - VIEW.width / 2, 0, WORLD.width - VIEW.width);
+  world.camera.y = clamp(world.player.y - VIEW.height / 2, 0, WORLD.height - VIEW.height);
 }
 
-// --- The fixed step ---------------------------------------------------------
+function stepAmbient(world, dt) {
+  for (const car of world.cars) {
+    if (car.driver === 'traffic') stepTrafficCar(car, world, dt);
+  }
+  for (const ped of world.peds) stepPedestrian(ped, world, dt);
+  resolveCarCollisions(world.cars);
+  updateCamera(world);
+}
 
+// One fixed step. `input` is the small interface from input.js (or a fake
+// with the same shape in tests): isDown, wasPressed, axisX, axisY.
 export function stepWorld(world, input, dt) {
   world.time += dt;
-  world.events = [];
-
+  if (world.state === 'title') {
+    stepAmbient(world, dt);
+    return;
+  }
   if (world.state !== 'play') return;
 
-  // One-shot actions.
-  if (input.wasPressed('KeyE')) {
-    if (world.player.car) exitCar(world);
-    else tryEnterCar(world);
+  const player = world.player;
+  if (player.punchCooldown > 0) player.punchCooldown -= dt;
+  if (player.hurtCooldown > 0) player.hurtCooldown -= dt;
+
+  if (world.missionFailed && input.wasPressed('Enter')) {
+    startMission(world, world.missionIndex);
   }
-  if (input.wasPressed('KeyF')) tryPunch(world);
 
-  // Player.
-  if (world.player.car) stepPlayerCar(world, dt, input);
-  else stepPlayerOnFoot(world, dt, input);
+  if (player.car) stepPlayerCar(world, input, dt);
+  else stepPlayerWalking(world, input, dt);
 
-  // Traffic: only cars whose driver is 'traffic'. The player's car is
-  // never stepped here, and police cars have their own chase step.
   for (const car of world.cars) {
-    if (car.driver === 'traffic') stepTrafficCar(world, car, dt);
+    if (car.driver === 'traffic') stepTrafficCar(car, world, dt);
   }
-  stepCarCollisions(world);
-  stepCarVsPeds(world);
-
-  for (const ped of world.peds) stepPedestrian(world, ped, dt);
   stepPolice(world, dt);
+  for (const ped of world.peds) stepPedestrian(ped, world, dt);
+  const hardest = resolveCarCollisions(world.cars);
+  if (hardest > 260 && player.car) world.events.crash = true;
 
-  // Missions.
-  const result = stepMission(world, dt);
-  if (result === 'failed') {
-    // Retry the same job with ENTER; handled by main.
-  }
-
-  // Dialogue advances on its own clock (one line per 3.2 s).
-  if (world.dialogue.length > 0) {
-    world.dialogueTimer += dt;
-    if (world.dialogueTimer > 3.2) {
-      world.dialogueTimer = 0;
-      world.dialogueLine++;
-      if (world.dialogueLine >= world.dialogue.length) {
-        world.dialogue = [];
-        world.dialogueLine = 0;
-      }
-    }
-  }
-
-  // Camera follows the player, clamped to the world.
-  const p = world.player;
-  world.camera.x = clamp(p.x - 640, 0, WORLD_W - 1280);
-  world.camera.y = clamp(p.y - 360, 0, WORLD_H - 720);
-
-  // Autosave: on job completion and every SAVE_EVERY_S seconds.
-  world.saveTimer += dt;
-  if (world.saveDue || world.saveTimer >= SAVE_EVERY_S) {
-    world.saveDue = false;
-    world.saveTimer = 0;
-    saveGame(world);
-  }
+  updateMission(world, dt);
+  updateCamera(world);
+  if (world.player.health <= 0 && world.state === 'play') world.state = 'wasted';
 }
 
-// --- Save / load ------------------------------------------------------------
-
-export function saveGame(world) {
-  if (world.noSave) return false;
-  if (typeof localStorage === 'undefined') return false;
-  try {
-    const data = {
-      cash: world.player.cash,
-      missionIndex: world.missionIndex,
-      jobsDone: world.jobsDone,
-      savedAt: Date.now(),
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function loadSave() {
-  if (typeof localStorage === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-export function applySave(world, save) {
-  if (!save) return;
-  world.player.cash = save.cash || 0;
-  world.jobsDone = save.jobsDone || 0;
-  const index = Math.min(save.missionIndex || 0, 3);
-  startMission(world, index);
-  world.dialogue = ['Mama Lou: Back at it, Rico. Pick up where you left off.'];
-  world.dialogueTimer = 0;
-}
-
-export function missionTitle(world) {
-  const m = currentMission(world);
-  return m ? m.title : 'Free Roam';
-}
+export { STEP };

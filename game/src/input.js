@@ -1,57 +1,67 @@
-// Keyboard + pointer input. Held keys are read every step; one-shot actions
-// (enter, punch, pause, confirm) are consumed once per press. In Node (no
-// document) the module still imports fine and just reports nothing held.
-
-const KEYMAP = {
-  KeyW: 'up', ArrowUp: 'up',
-  KeyS: 'down', ArrowDown: 'down',
-  KeyA: 'left', ArrowLeft: 'left',
-  KeyD: 'right', ArrowRight: 'right',
-  ShiftLeft: 'run', ShiftRight: 'run',
+// Keyboard input. Held keys give a steering direction; one-shot presses
+// (enter a car, punch, start, pause) are queued by key code and taken once,
+// so a press between two frames is never lost and never counted twice.
+// The world only ever sees this small interface, which the headless tests
+// can fake with a plain object of the same shape.
+const DIRECTIONS = {
+  ArrowUp: 'up', KeyW: 'up',
+  ArrowDown: 'down', KeyS: 'down',
+  ArrowLeft: 'left', KeyA: 'left',
+  ArrowRight: 'right', KeyD: 'right',
 };
 
-export function createInput() {
+export function createInput(target) {
   const held = new Set();
   const pressed = new Set();
-  const input = {
-    held,
-    pressed,
-    // Scripted drivers (shots / tests) write here; step() merges them in.
-    script: null,
+
+  function onKeyDown(event) {
+    const dir = DIRECTIONS[event.code];
+    if (dir) {
+      held.add(dir);
+      event.preventDefault();
+      return;
+    }
+    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
+      held.add('run');
+      return;
+    }
+    if (!event.repeat) pressed.add(event.code);
+    if (['Space', 'Enter', 'KeyE', 'KeyF', 'KeyP'].includes(event.code)) event.preventDefault();
+  }
+
+  function onKeyUp(event) {
+    const dir = DIRECTIONS[event.code];
+    if (dir) held.delete(dir);
+    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') held.delete('run');
+  }
+
+  function onBlur() {
+    held.clear();
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', onBlur);
+  if (target) {
+    target.addEventListener('pointerdown', () => pressed.add('Enter'));
+  }
+
+  return {
     isDown(name) {
-      if (input.script && input.script.held && input.script.held.has(name)) return true;
       return held.has(name);
     },
-    wasPressed(name) {
-      if (input.script && input.script.pressed && input.script.pressed.has(name)) return true;
-      return pressed.has(name);
+    wasPressed(code) {
+      return pressed.has(code);
     },
-    // Axis in [-1, 1] for driving / walking.
     axisX() {
-      return (input.isDown('right') ? 1 : 0) - (input.isDown('left') ? 1 : 0);
+      return (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
     },
     axisY() {
-      return (input.isDown('down') ? 1 : 0) - (input.isDown('up') ? 1 : 0);
+      return (held.has('down') ? 1 : 0) - (held.has('up') ? 1 : 0);
     },
+    // Drop the one-shot presses at the end of each frame.
     endFrame() {
       pressed.clear();
-      if (input.script) input.script.pressed = new Set();
-    },
-    attach() {
-      if (typeof document === 'undefined') return;
-      document.addEventListener('keydown', (e) => {
-        const name = KEYMAP[e.code] || e.code;
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
-          e.preventDefault();
-        }
-        if (!e.repeat) pressed.add(name);
-        held.add(name);
-      });
-      document.addEventListener('keyup', (e) => {
-        held.delete(KEYMAP[e.code] || e.code);
-      });
-      document.addEventListener('blur', () => held.clear());
     },
   };
-  return input;
 }
