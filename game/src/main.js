@@ -1,219 +1,150 @@
-// Boot and the one loop: input is read every frame, the world advances in
-// fixed 1/60 s steps (several in a slow frame, none in a fast one), and the
-// renderer paints what is there. The game moves between five screens:
-// title, play, pause, busted and wasted.
-//
-// ?seed=N fixes the city. ?shot=chase|drive|street|start (with &seed=N)
-// stages that scene instead of running the loop, paints it twice and sets
-// window.__shotReady for a screenshot.
-import { AUTOSAVE_SECONDS, SAVE_KEY, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, stepWorld } from './world.js';
-import { createInput } from './input.js';
+// Vice Shores — boot, fixed-step loop, screens, save/load and the ?shot=
+// screenshot mode. The simulation itself lives in world.js; this file only
+// wires it to the canvas, the keyboard and localStorage.
+
+import { CFG } from './config.js';
+import { createWorld, stepWorld, saveSnapshot, retryAfterArrest, retryFailedMission } from './world.js';
+import { drawWorld } from './render.js';
+import { createInput, clearPressed, onFirstKey } from './input.js';
 import { createAudio } from './audio.js';
-import {
-  SCREEN_BUSTED, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WASTED, createRenderer,
-} from './render.js';
-import { runShot } from './shots.js';
+import { applyShot } from './shots.js';
 import { startMission } from './missions.js';
 
-/** The longest frame the loop catches up on; a longer stall is dropped. */
-const MAX_FRAME = 0.25;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
 
 const params = new URLSearchParams(window.location.search);
+const seed = Number(params.get('seed') || 7) || 7;
 const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const audio = createAudio();
+const input = createInput();
+onFirstKey(() => audio.unlock());
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const renderer = createRenderer(canvas);
+// ---------------------------------------------------------------- save
 
-let world = createWorld(seed);
-
-function readSave() {
+function loadSave() {
   try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
+    const raw = window.localStorage.getItem(CFG.saveKey);
     if (!raw) return null;
-    const save = JSON.parse(raw);
-    if (typeof save.cash !== 'number' || typeof save.missionIndex !== 'number') return null;
-    return save;
+    const data = JSON.parse(raw);
+    if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
+    return data;
   } catch {
     return null;
   }
 }
 
-function writeSave() {
+function storeSave(world) {
   try {
-    const save = {
-      cash: world.player.cash,
-      missionIndex: Math.min(3, world.missionIndex),
-      jobsDone: world.jobsDone,
-    };
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-    world.save = save;
+    window.localStorage.setItem(CFG.saveKey, JSON.stringify(saveSnapshot(world)));
   } catch {
-    // Storage can be off (private windows): the game still plays.
+    // Storage full or blocked: the game still plays.
   }
 }
 
-world.save = readSave();
+// ---------------------------------------------------------------- boot
 
-// The tests (and anyone debugging) can reach the live world here.
-window.VICE = { world };
+const saved = loadSave();
+const world = createWorld(seed, saved || {});
+world.hasSave = !!saved;
+world.saveCash = saved ? saved.cash : 0;
+world.saveMission = saved ? saved.missionIndex : 0;
 
-function runShotMode(name) {
-  world = runShot(name, seed);
-  world.save = readSave();
-  window.VICE.world = world;
-  const screen = name === 'start' ? SCREEN_TITLE : SCREEN_PLAY;
-  let painted = 0;
-  function paint() {
-    renderer.draw(world, screen);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
+// For automated tests: the live world, one hop away.
+window.__viceShores = { world, input };
 
-function runGame() {
-  const input = createInput(canvas);
-  const audio = createAudio();
-  let screen = SCREEN_TITLE;
-  let autosaveTimer = 0;
-  let accumulator = 0;
+// Screenshot mode: run the scripted scene, draw one frame, stop. Hide the
+// status line so the canvas fills the 1280x720 viewport exactly.
+if (shot) {
+  if (statusEl) statusEl.style.display = 'none';
+  applyShot(world, shot);
+  drawWorld(ctx, world);
+  document.title = 'Vice Shores — shot ' + shot;
+  if (statusEl) statusEl.textContent = 'shot=' + shot + ' seed=' + seed;
+  window.__shotDone = true;
+} else {
+  // Normal play.
+  const DT = 1 / 60;
   let last = performance.now();
-
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame(continueSave) {
-    if (continueSave && world.save) {
-      world.player.cash = world.save.cash;
-      world.jobsDone = world.save.jobsDone || 0;
-      startMission(world, Math.min(3, world.save.missionIndex));
-    } else {
-      world.player.cash = 0;
-      world.jobsDone = 0;
-      startMission(world, 0);
-    }
-    world.player.health = 100;
-    world.wanted = 0;
-    world.state = 'play';
-    screen = SCREEN_PLAY;
-    accumulator = 0;
-    announce('Playing. Vice Shores is yours, Rico.');
-  }
-
-  function retryAfterEnd() {
-    // Busted or wasted: keep the cash and the job, lose the heat.
-    for (const car of world.policeCars) car.gone = true;
-    world.cars = world.cars.filter((c) => !c.gone);
-    world.policeCars = [];
-    world.footCops = [];
-    world.wanted = 0;
-    world.quietTimer = 0;
-    world.player.health = 100;
-    world.player.car = null;
-    world.player.x = 1061;
-    world.player.y = 1450;
-    world.player.angle = -Math.PI / 2;
-    world.state = 'play';
-    screen = SCREEN_PLAY;
-    accumulator = 0;
-    announce('Back on the street, Rico.');
-  }
-
-  function handleActions() {
-    if (screen === SCREEN_TITLE) {
-      if (input.wasPressed('Enter') || input.wasPressed('Space')) startGame(true);
-      else if (input.wasPressed('KeyN')) startGame(false);
-    } else if (screen === SCREEN_PLAY) {
-      if (input.wasPressed('KeyP') || input.wasPressed('Escape')) {
-        screen = SCREEN_PAUSED;
-        world.state = 'pause';
-        announce('Paused.');
-      }
-    } else if (screen === SCREEN_PAUSED) {
-      if (input.wasPressed('KeyP') || input.wasPressed('Escape') || input.wasPressed('Enter')) {
-        screen = SCREEN_PLAY;
-        world.state = 'play';
-        announce('Playing.');
-      }
-    } else if (screen === SCREEN_BUSTED || screen === SCREEN_WASTED) {
-      if (input.wasPressed('Enter') || input.wasPressed('Space')) retryAfterEnd();
-    }
-  }
-
-  function consumeEvents() {
-    const e = world.events;
-    if (e.pickup) audio.pickup();
-    if (e.cash) audio.cash();
-    if (e.punch) audio.punch();
-    if (e.crash) audio.crash();
-    if (e.mission) audio.mission();
-    if (e.busted) audio.busted();
-    world.events = {};
-  }
-
-  function step() {
-    stepWorld(world, input, STEP);
-    if (world.state === 'busted' && screen === SCREEN_PLAY) {
-      screen = SCREEN_BUSTED;
-      world.events.busted = true;
-      announce('Busted.');
-    } else if (world.state === 'wasted' && screen === SCREEN_PLAY) {
-      screen = SCREEN_WASTED;
-      world.events.busted = true;
-      announce('Wasted.');
-    }
-    consumeEvents();
-    // Save on every job completion, and every AUTOSAVE_SECONDS of play.
-    if (screen === SCREEN_PLAY) {
-      autosaveTimer += STEP;
-      if (world.saveDue || autosaveTimer >= AUTOSAVE_SECONDS) {
-        writeSave();
-        world.saveDue = false;
-        autosaveTimer = 0;
-      }
-    }
-    audio.update(STEP, world.player.car ? Math.abs(world.player.car.speed) : 0, world.wanted);
-  }
+  let acc = 0;
 
   function frame(now) {
     requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    let elapsed = (now - last) / 1000;
     last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
+    if (elapsed > 0.25) elapsed = 0.25;
+    acc += elapsed;
+
+    // Screen transitions, from one-shot keys.
+    let consumed = false;
+    if (world.screen === 'title' && (input.confirm || input.pointerDown)) {
+      world.screen = 'play';
+      audio.unlock();
+      if (world.missionIndex < 4) startMission(world, world.missionIndex);
+      consumed = true;
+    } else if (world.screen === 'play' && input.pause) {
+      world.screen = 'pause';
+      consumed = true;
+    } else if (world.screen === 'pause' && input.pause) {
+      world.screen = 'play';
+      consumed = true;
+    } else if ((world.screen === 'busted' || world.screen === 'wasted') && input.confirm) {
+      retryAfterArrest(world);
+      consumed = true;
+    } else if (world.missionFailed && input.confirm && world.screen === 'play') {
+      retryFailedMission(world);
+      consumed = true;
     }
-    renderer.draw(world, screen);
-    input.endFrame();
+
+    // Fixed steps, at most five per frame so a slow frame cannot spiral.
+    let steps = 0;
+    while (acc >= DT && steps < 5) {
+      stepWorld(world, input, DT);
+      acc -= DT;
+      steps++;
+    }
+    if (steps === 5) acc = 0;
+    // One-shot keys are cleared only once a step (or a transition) has
+    // consumed them. Clearing them on a frame that ran no step would drop
+    // a quick key press entirely.
+    if (steps > 0 || consumed) clearPressed(input);
+
+    // Sound from the events the step raised.
+    const ev = world.events;
+    if (ev.crash) audio.crash();
+    if (ev.punch) audio.punch();
+    if (ev.pickup) audio.pickup();
+    if (ev.cash) audio.cash();
+    if (ev.missionStart || ev.stepDone) audio.mission();
+    if (ev.missionFailed) audio.jingle();
+    world.events = freshEvents();
+    const player = world.player;
+    audio.setEngine(player.inCar ? Math.abs(player.inCar.speed) / player.inCar.topSpeed : 0);
+    audio.siren(world.wanted > 0, world.time);
+
+    // Autosave: on every job payout and every 20 seconds of play.
+    world.saveTimer += elapsed;
+    if (ev.cash || world.saveTimer >= CFG.saveEverySeconds) {
+      storeSave(world);
+      world.saveTimer = 0;
+    }
+
+    drawWorld(ctx, world);
+    if (statusEl) {
+      statusEl.textContent =
+        '$' + player.cash + ' · ' + (world.missionIndex < 4 ? 'Job ' + (world.missionIndex + 1) + '/4' : 'Free Roam') +
+        ' · ' + world.wanted + '★ · ' + world.district;
+    }
   }
 
-  window.addEventListener('keydown', () => audio.unlock());
-  window.addEventListener('pointerdown', () => audio.unlock());
-
-  // Leaving the tab pauses a running game rather than letting the city run unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      world.state = 'pause';
-      announce('Paused.');
-    }
-  });
-
-  announce('Vice Shores. Press Enter to start.');
   requestAnimationFrame(frame);
 }
 
-if (shot) runShotMode(shot);
-else runGame();
+function freshEvents() {
+  return {
+    crime: false, cash: 0, stepDone: false, missionStart: false,
+    missionFailed: false, wantedDown: false, rammed: false, busted: false,
+    punch: false, crash: false, pickup: false, enteredCar: false,
+  };
+}

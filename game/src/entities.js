@@ -1,237 +1,305 @@
-// The moving things: the player on foot, traffic cars, police cars and
-// pedestrians, and the step functions that move them. The world module owns
-// the rules that connect them (crimes, missions, wanted level); this file
-// only knows how each thing moves and bumps into things.
-import { CAR, PED_FLEE_SPEED, PED_SPEED, PLAYER, TRAFFIC_SPEED, WORLD } from './config.js';
-import { angleDiff, clamp, dist, turnToward } from './random.js';
-import { collideBuildings, randomSidewalkPoint } from './city.js';
+// Everything that moves in Vice Shores: the player, pedestrians, traffic
+// cars and police cars. Each entity is a plain object; each step function
+// advances it by dt seconds using only the world and the seeded RNG.
 
-export const CAR_MODELS = {
-  sedan: { name: 'sedan', w: 44, h: 22, topSpeed: 540, colors: ['#c94f43', '#4f7ec9', '#c9c9c9', '#5a6b7a', '#7a9e5f'] },
-  coupe: { name: 'coupe', w: 42, h: 20, topSpeed: 560, colors: ['#d9a03a', '#8a5fd0', '#3aa88f', '#c94f43'] },
-  taxi: { name: 'taxi', w: 44, h: 22, topSpeed: 540, colors: ['#f2c200'] },
-  van: { name: 'van', w: 50, h: 24, topSpeed: 460, colors: ['#e8e8e8', '#7a8a99', '#b08a5a'] },
-  sports: { name: 'sports', w: 44, h: 20, topSpeed: 640, colors: ['#f2f2f2'] },
-  pickup: { name: 'pickup', w: 48, h: 22, topSpeed: 500, colors: ['#5a7a3a', '#a05a3a', '#4a6a8a'] },
-  police: { name: 'police', w: 44, h: 22, topSpeed: 570, colors: ['#1d2126'] },
-};
+import { CFG, CAR_MODELS } from './config.js';
+import { angleDiff, chance, clamp, dist, pick, rand, randInt } from './random.js';
+import { collideBuildings, nearestNode, onRoad, randomRoadPoint, randomSidewalkPoint } from './city.js';
 
-export function makeCar(modelName, x, y, angle, rng) {
-  const model = CAR_MODELS[modelName];
-  return {
-    x, y, angle, speed: 0,
-    model,
-    color: rng ? rng.pick(model.colors) : model.colors[0],
-    driver: 'parked', // traffic | parked | player | police
-    node: 0,
-    prevNode: -1,
-    targetSpeed: 0,
-  };
-}
+// ---------------------------------------------------------------- player
 
 export function makePlayer(x, y) {
   return {
-    x, y, angle: -Math.PI / 2, health: PLAYER.health, cash: 0,
-    car: null, punchCooldown: 0, hurtCooldown: 0,
+    x, y, angle: -Math.PI / 2, // facing north
+    health: CFG.playerHealth,
+    cash: 0,
+    inCar: null, // the car object the player is driving, or null
+    walkPhase: 0,
+    punchTimer: 0,
+    punchCooldown: 0,
+    downTimer: 0, // >0 while knocked down (only used for peds/cops)
+    heldTimer: 0, // seconds a foot cop has held the player
+    speed: 0,
   };
 }
 
-const SHIRTS = ['#d94f3d', '#3d7dd9', '#e8b23a', '#7a4fd0', '#4fae62', '#e07ba8', '#e8e8e8'];
+// ---------------------------------------------------------------- cars
 
-export function makePedestrian(x, y, rng) {
+let carSeq = 0;
+
+export function makeCar(kind, x, y, angle, model, rng) {
+  const def = CAR_MODELS[model];
   return {
-    x, y, angle: rng ? rng.range(0, Math.PI * 2) : 0,
-    speed: PED_SPEED,
-    state: 'walk', // walk | flee | down
+    id: ++carSeq,
+    kind, // 'traffic' | 'parked' | 'taxi' | 'sports' | 'police' | 'player'
+    model,
+    color: pickColor(kind, model, rng),
+    x, y, angle,
+    speed: 0,
+    len: def.len, wid: def.wid,
+    topSpeed: CFG.carTopSpeed * def.top,
+    driver: kind === 'traffic' || kind === 'taxi',
+    node: -1, // current road-graph node (traffic only)
+    next: -1, // node being driven to (traffic only)
+    wait: 0,
+    hitCooldown: 0,
+  };
+}
+
+function pickColor(kind, model, rng) {
+  if (kind === 'police') return '#2a4a8a';
+  if (kind === 'taxi') return '#f2c230';
+  const colors = CAR_MODELS[model].colors;
+  const stream = rng || Math.random;
+  return colors[Math.floor(stream() * colors.length)];
+}
+
+// The yellow mission taxi, parked by the plaza.
+export function makeTaxi(x, y, rng) {
+  const car = makeCar('taxi', x, y, -Math.PI / 2, 'taxi', rng);
+  car.driver = false;
+  return car;
+}
+
+// The white sports car for the final job, parked in the mall lot.
+export function makeSportsCar(x, y, rng) {
+  const car = makeCar('sports', x, y, Math.PI / 2, 'sports', rng);
+  car.color = '#e8e8e8';
+  car.driver = false;
+  return car;
+}
+
+// Spawn the ambient traffic: cars already on the road graph, mid-edge.
+export function spawnTraffic(world) {
+  const cars = [];
+  const models = ['sedan', 'sedan', 'coupe', 'van', 'sports', 'pickup', 'taxi'];
+  for (let n = 0; n < CFG.trafficCount; n++) {
+    const node = pick(world.rng, world.city.nodes);
+    const links = node.links;
+    if (!links.length) continue;
+    const next = pick(world.rng, links);
+    const target = world.city.nodes[next];
+    const t = rand(world.rng, 0.15, 0.85);
+    const x = node.x + (target.x - node.x) * t;
+    const y = node.y + (target.y - node.y) * t;
+    const car = makeCar('traffic', x, y, Math.atan2(target.y - node.y, target.x - node.x), pick(world.rng, models), world.rng);
+    car.node = node.id;
+    car.next = next;
+    car.speed = CFG.trafficSpeed * rand(world.rng, 0.8, 1.1);
+    cars.push(car);
+  }
+  return cars;
+}
+
+// A few parked cars in lots and along kerbs, for the player to steal.
+export function spawnParked(world) {
+  const spots = [
+    [1000, 2000, 'sedan'], [1800, 2000, 'coupe'], [600, 1400, 'sedan'],
+    [2200, 600, 'pickup'], [1400, 2200, 'van'], [2600, 1000, 'sedan'],
+    [1000, 600, 'coupe'], [1800, 1000, 'van'],
+  ];
+  const cars = [];
+  for (const [x, y, model] of spots) {
+    const car = makeCar('parked', x + rand(world.rng, -20, 20), y + rand(world.rng, -20, 20), rand(world.rng, 0, Math.PI * 2), model, world.rng);
+    car.driver = false;
+    cars.push(car);
+  }
+  return cars;
+}
+
+// ---------------------------------------------------------------- peds
+
+const SHIRTS = ['#d05050', '#5080d0', '#50a050', '#d0a050', '#a050c0', '#e0e0e0', '#505050', '#d08050'];
+const SKINS = ['#e8b88a', '#c98a5a', '#8a5a3a', '#f0c8a0'];
+
+export function makePed(x, y, rng) {
+  return {
+    x, y,
+    angle: rand(rng, 0, Math.PI * 2),
+    speed: 0,
     target: null,
     downTimer: 0,
-    fleeTimer: 0,
-    danger: null,
-    color: rng ? rng.pick(SHIRTS) : SHIRTS[0],
+    fleeing: false,
+    shirt: pick(rng, SHIRTS),
+    skin: pick(rng, SKINS),
+    walkPhase: rand(rng, 0, Math.PI * 2),
+    cop: false,
   };
 }
 
-export function knockDown(ped, seconds) {
-  ped.state = 'down';
-  ped.downTimer = seconds || 4;
-  ped.danger = null;
-}
-
-// --- On foot ---
-
-export function stepPlayerOnFoot(player, input, dt, city) {
-  const ax = input.axisX();
-  const ay = input.axisY();
-  if (ax === 0 && ay === 0) return;
-  const speed = input.isDown('run') ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const len = Math.hypot(ax, ay);
-  player.x += (ax / len) * speed * dt;
-  player.y += (ay / len) * speed * dt;
-  player.angle = Math.atan2(ay, ax);
-  player.x = clamp(player.x, 12, WORLD.width - 12);
-  player.y = clamp(player.y, 12, WORLD.height - 12);
-  collideBuildings(city, player, PLAYER.radius);
-}
-
-// --- Driving (the player's car) ---
-
-export function drivePlayerCar(car, input, dt) {
-  const top = car.model.topSpeed;
-  if (input.isDown('up')) car.speed += CAR.accel * dt;
-  else if (input.isDown('down')) {
-    car.speed -= (car.speed > 0 ? CAR.brake : CAR.accel * 0.7) * dt;
-  } else {
-    // Rolling drag, plus a gentle stop when nobody is on the pedals.
-    car.speed -= car.speed * 0.45 * dt;
-    if (Math.abs(car.speed) < 6) car.speed = 0;
+export function spawnPeds(world) {
+  const peds = [];
+  for (let n = 0; n < CFG.pedCount; n++) {
+    const p = randomSidewalkPoint(world.rng, world.city);
+    peds.push(makePed(p.x, p.y, world.rng));
   }
-  car.speed -= car.speed * 0.12 * dt; // air drag grows with speed
-  car.speed = clamp(car.speed, -CAR.maxReverse, top);
-  const steer = input.axisX();
-  if (steer !== 0 && Math.abs(car.speed) > 4) {
-    const grip = Math.min(1, Math.abs(car.speed) / 180);
-    car.angle += steer * CAR.turnRate * grip * Math.sign(car.speed) * dt;
-  }
-  car.x += Math.cos(car.angle) * car.speed * dt;
-  car.y += Math.sin(car.angle) * car.speed * dt;
-  car.x = clamp(car.x, 14, WORLD.width - 14);
-  car.y = clamp(car.y, 14, WORLD.height - 14);
+  return peds;
 }
 
-// --- Traffic: follow the road graph, slow down for the car ahead ---
+// ---------------------------------------------------------------- traffic
 
-export function stepTrafficCar(car, world, dt) {
-  const node = world.city.nodes[car.node];
-  const dx = node.x - car.x;
-  const dy = node.y - car.y;
+// Drive one traffic car along the road graph for dt seconds.
+export function stepTrafficCar(world, car, dt) {
+  if (car.wait > 0) { car.wait -= dt; return; }
+  const city = world.city;
+  const target = city.nodes[car.next];
+  if (!target) return;
+  const dx = target.x - car.x;
+  const dy = target.y - car.y;
   const d = Math.hypot(dx, dy);
-  if (d < 14) {
-    car.prevNode = car.node;
-    const options = node.neighbors.filter((n) => n !== car.prevNode);
-    const pool = options.length > 0 ? options : node.neighbors;
-    car.node = world.rng.pick(pool);
-    return;
-  }
-  const wantAngle = Math.atan2(dy, dx);
-  car.angle = turnToward(car.angle, wantAngle, 3.4, dt);
-  // Slow for a car ahead on the same stretch of road.
+  const want = Math.atan2(dy, dx);
+  car.angle += clamp(angleDiff(car.angle, want), -3.2 * dt, 3.2 * dt);
+
+  // Slow down for a car ahead in the same lane.
   let blocked = false;
   for (const other of world.cars) {
-    if (other === car || other.speed === 0 && other.driver === 'parked') continue;
+    if (other === car || other === world.player.inCar) continue;
     const ox = other.x - car.x;
     const oy = other.y - car.y;
     const ahead = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
     const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
-    if (ahead > 0 && ahead < 78 && side < 26) {
-      blocked = true;
-      break;
-    }
+    if (ahead > 0 && ahead < 78 && side < 30) { blocked = true; break; }
   }
-  // ...and speed up when a faster car is right on the bumper, so traffic
-  // clears the way instead of forming a rolling roadblock.
-  let tailgated = false;
-  for (const other of world.cars) {
-    if (other === car) continue;
-    const ox = other.x - car.x;
-    const oy = other.y - car.y;
-    const behind = -(ox * Math.cos(car.angle) + oy * Math.sin(car.angle));
-    const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
-    if (behind > 0 && behind < 110 && side < 26 && Math.abs(other.speed) > Math.abs(car.speed) + 50) {
-      tailgated = true;
-      break;
-    }
-  }
-  const target = tailgated ? 320 : blocked ? 0 : TRAFFIC_SPEED;
-  if (car.speed < target) car.speed = Math.min(target, car.speed + 220 * dt);
-  else if (car.speed > target) car.speed = Math.max(target, car.speed - 420 * dt);
+  const goal = blocked ? 0 : CFG.trafficSpeed;
+  car.speed += clamp(goal - car.speed, -260 * dt, 200 * dt);
+
   car.x += Math.cos(car.angle) * car.speed * dt;
   car.y += Math.sin(car.angle) * car.speed * dt;
+
+  if (d < 26) {
+    // Reached the intersection: pick a next edge, preferring not to U-turn.
+    const options = target.links.filter((id) => id !== car.node);
+    const next = options.length ? pick(world.rng, options) : target.links[0];
+    car.node = car.next;
+    car.next = next;
+    if (chance(world.rng, 0.06)) car.wait = rand(world.rng, 0.5, 1.5);
+  }
 }
 
-// --- Pedestrians: stroll the sidewalks, flee a fast car, lie down when hit ---
+// ---------------------------------------------------------------- peds
 
-export function stepPedestrian(ped, world, dt) {
-  if (ped.state === 'down') {
+// Walk one pedestrian: amble between sidewalk points, flee a fast car.
+export function stepPed(world, ped, dt) {
+  if (ped.downTimer > 0) {
     ped.downTimer -= dt;
-    if (ped.downTimer <= 0) {
-      ped.state = 'walk';
-      ped.target = null;
-    }
     return;
   }
-  if (ped.state === 'flee') {
-    // A fleeing pedestrian whose danger is gone just goes back to walking.
-    if (!ped.danger) {
-      ped.state = 'walk';
-      ped.target = null;
+  const player = world.player;
+  const playerCar = player.inCar;
+  let danger = null;
+  if (playerCar && Math.abs(playerCar.speed) > 200) danger = playerCar;
+  if (danger) {
+    const d = dist(ped.x, ped.y, danger.x, danger.y);
+    if (d < 150) {
+      ped.fleeing = true;
+      const away = Math.atan2(ped.y - danger.y, ped.x - danger.x);
+      ped.angle += clamp(angleDiff(ped.angle, away), -6 * dt, 6 * dt);
+      ped.speed = CFG.pedFleeSpeed;
+      ped.x += Math.cos(ped.angle) * ped.speed * dt;
+      ped.y += Math.sin(ped.angle) * ped.speed * dt;
+      ped.walkPhase += dt * 14;
       return;
     }
-    ped.fleeTimer -= dt;
-    if (ped.fleeTimer <= 0) {
-      ped.state = 'walk';
-      ped.danger = null;
-      ped.target = null;
-      return;
-    }
-    const away = Math.atan2(ped.y - ped.danger.y, ped.x - ped.danger.x);
-    ped.angle = away;
-    ped.x += Math.cos(away) * PED_FLEE_SPEED * dt;
-    ped.y += Math.sin(away) * PED_FLEE_SPEED * dt;
-    ped.x = clamp(ped.x, 12, WORLD.width - 12);
-    ped.y = clamp(ped.y, 12, WORLD.height - 12);
-    return;
   }
-  if (!ped.target || dist(ped.x, ped.y, ped.target.x, ped.target.y) < 14) {
-    ped.target = randomSidewalkPoint(world.rng);
+  ped.fleeing = false;
+  if (!ped.target || dist(ped.x, ped.y, ped.target.x, ped.target.y) < 18) {
+    ped.target = randomSidewalkPoint(world.rng, world.city);
   }
   const want = Math.atan2(ped.target.y - ped.y, ped.target.x - ped.x);
-  ped.angle = want;
-  ped.x += Math.cos(want) * PED_SPEED * dt;
-  ped.y += Math.sin(want) * PED_SPEED * dt;
+  ped.angle += clamp(angleDiff(ped.angle, want), -5 * dt, 5 * dt);
+  ped.speed = CFG.pedSpeed;
+  ped.x += Math.cos(ped.angle) * ped.speed * dt;
+  ped.y += Math.sin(ped.angle) * ped.speed * dt;
+  ped.x = clamp(ped.x, 40, CFG.worldW - 40);
+  ped.y = clamp(ped.y, 40, CFG.worldH - 40);
+  ped.walkPhase += dt * 9;
 }
 
-// Push overlapping cars apart. Only a genuinely hard hit (fast approach
-// along the line between the cars) costs speed; light resting contact just
-// separates them, so a chase does not grind both cars to a halt.
-export function resolveCarCollisions(cars) {
-  let hardest = 0;
-  for (let i = 0; i < cars.length; i += 1) {
-    for (let j = i + 1; j < cars.length; j += 1) {
-      const a = cars[i];
-      const b = cars[j];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.hypot(dx, dy);
-      const min = CAR.radius * 2;
-      if (d >= min || d < 0.01) continue;
-      const push = (min - d) / 2;
-      const nx = dx / d;
-      const ny = dy / d;
-      // The push is shared by speed: a parked car holds its ground while the
-      // car that drove into it takes the shove, so a chase cannot grind a
-      // parked car down the road.
-      const speedSum = Math.abs(a.speed) + Math.abs(b.speed);
-      const aShare = speedSum > 0 ? (Math.abs(a.speed) / speedSum) * 2 : 1;
-      const bShare = speedSum > 0 ? (Math.abs(b.speed) / speedSum) * 2 : 1;
-      a.x -= nx * push * aShare;
-      a.y -= ny * push * aShare;
-      b.x += nx * push * bShare;
-      b.y += ny * push * bShare;
-      // Approach speed along the line between the cars.
-      const avx = Math.cos(a.angle) * a.speed;
-      const avy = Math.sin(a.angle) * a.speed;
-      const bvx = Math.cos(b.angle) * b.speed;
-      const bvy = Math.sin(b.angle) * b.speed;
-      const closing = (avx - bvx) * nx + (avy - bvy) * ny;
-      const impact = Math.abs(closing);
-      if (impact > hardest) hardest = impact;
-      if (impact > 80) {
-        a.speed *= 0.82;
-        b.speed *= 0.82;
-      }
+// ---------------------------------------------------------------- driving
+
+// Advance a driven car (the player's) by dt. Returns 'crash' when it hit a
+// building hard, 'bump' for a light scrape, '' otherwise.
+export function stepDrivenCar(world, car, input, dt) {
+  const top = car.topSpeed;
+  if (input.up) car.speed += CFG.carAccel * dt;
+  else if (input.down) {
+    if (car.speed > 20) car.speed -= CFG.carBrake * dt;
+    else car.speed = Math.max(-CFG.carReverseMax, car.speed - CFG.carAccel * 0.6 * dt);
+  } else {
+    // Coast down.
+    car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 240 * dt);
+  }
+  car.speed = clamp(car.speed, -CFG.carReverseMax, top);
+
+  const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
+  const speedFactor = clamp(Math.abs(car.speed) / 240, 0, 1);
+  car.angle += steer * CFG.carTurn * speedFactor * Math.sign(car.speed || 1) * dt;
+
+  car.x += Math.cos(car.angle) * car.speed * dt;
+  car.y += Math.sin(car.angle) * car.speed * dt;
+  car.x = clamp(car.x, 30, CFG.worldW - 30);
+  car.y = clamp(car.y, 30, CFG.worldH - 30);
+
+  // Buildings: push the car out at its nose and tail circles.
+  let result = '';
+  for (const off of [car.len * 0.32, -car.len * 0.32]) {
+    const probe = {
+      x: car.x + Math.cos(car.angle) * off,
+      y: car.y + Math.sin(car.angle) * off,
+    };
+    if (collideBuildings(world.city, probe, car.wid * 0.62)) {
+      const hard = Math.abs(car.speed) > 260;
+      car.x += probe.x - (car.x + Math.cos(car.angle) * off);
+      car.y += probe.y - (car.y + Math.sin(car.angle) * off);
+      car.speed *= hard ? 0.35 : 0.7;
+      result = hard ? 'crash' : 'bump';
     }
   }
-  return hardest;
+  return result;
 }
 
-export { angleDiff };
+// Two cars overlap: push them apart and trade momentum along the line of
+// centres (equal-mass elastic impulse, restitution 0.4). A fast car
+// rear-ending a slow one shoves it forward instead of welding both cars
+// together at a crawl — the old average-speed version did exactly that.
+export function collideCars(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const d = Math.hypot(dx, dy);
+  const min = (a.len + b.len) * 0.42;
+  if (d >= min || d < 0.01) return false;
+  const nx = dx / d;
+  const ny = dy / d;
+  const push = (min - d) / 2;
+  a.x -= nx * push; a.y -= ny * push;
+  b.x += nx * push; b.y += ny * push;
+
+  // Velocity vectors from each car's heading and scalar speed.
+  const vax = Math.cos(a.angle) * a.speed;
+  const vay = Math.sin(a.angle) * a.speed;
+  const vbx = Math.cos(b.angle) * b.speed;
+  const vby = Math.sin(b.angle) * b.speed;
+  const rvn = (vbx - vax) * nx + (vby - vay) * ny;
+  if (rvn >= 0) return true; // moving apart: position only
+  const j = (-(1 + 0.4) * rvn) / 2;
+  const vax2 = vax - j * nx;
+  const vay2 = vay - j * ny;
+  const vbx2 = vbx + j * nx;
+  const vby2 = vby + j * ny;
+  // Back to scalar speeds along each car's own heading.
+  a.speed = vax2 * Math.cos(a.angle) + vay2 * Math.sin(a.angle);
+  b.speed = vbx2 * Math.cos(b.angle) + vby2 * Math.sin(b.angle);
+  return true;
+}
+
+// Nearest car within range of a point (for E to enter).
+export function nearestCar(world, x, y, range) {
+  let best = null;
+  let bestD = range;
+  for (const car of world.cars) {
+    if (car.kind === 'police') continue;
+    const d = dist(x, y, car.x, car.y);
+    if (d < bestD) { bestD = d; best = car; }
+  }
+  return best;
+}

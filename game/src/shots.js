@@ -1,168 +1,147 @@
-// The four deterministic `?shot=` scenes. Each one plays the real rules
-// forward from a fresh world with a fixed seed and a scripted driver, then
-// the main loop draws one frame and stops — so every shot is a real render
-// of the game's own code, and the same seed always gives the same frame.
-import { STEP } from './config.js';
-import { createWorld, stepWorld } from './world.js';
-import { startMission, SPOTS } from './missions.js';
-import { spawnPoliceCar } from './police.js';
-import { makeCar } from './entities.js';
+// The four deterministic screenshot scenes. Each one runs the real
+// simulation forward from a fresh world with a fixed seed and a scripted
+// driver, then the browser draws one frame and stops — so every shot is a
+// real render of the game's own code, and the same seed always gives the
+// same frame.
+//
+// The scripted driver steers with plain geometry: it holds the accelerator
+// and nudges left or right to stay on its road. No randomness is used here
+// beyond the world's own seeded stream, so the scenes are deterministic.
 
-class ShotInput {
-  constructor() {
-    this.held = new Set();
-    this.pressed = new Set();
+import { CFG } from './config.js';
+import { clamp } from './random.js';
+import { stepWorld } from './world.js';
+import { makeCar, makePed } from './entities.js';
+import { startMission, say } from './missions.js';
+import { blankInput } from './input.js';
+import { randomRoadPoint, randomSidewalkPoint } from './city.js';
+
+const DT = 1 / 60;
+
+// Run n fixed steps with the driver function supplying each step's input.
+function run(world, seconds, driver) {
+  const steps = Math.round(seconds / DT);
+  for (let i = 0; i < steps; i++) {
+    stepWorld(world, driver(world, i) || blankInput(), DT);
   }
-  isDown(name) { return this.held.has(name); }
-  wasPressed() { return false; }
-  axisX() { return (this.held.has('right') ? 1 : 0) - (this.held.has('left') ? 1 : 0); }
-  axisY() { return (this.held.has('down') ? 1 : 0) - (this.held.has('up') ? 1 : 0); }
-  endFrame() { this.pressed.clear(); }
 }
 
-// Steer the player's car toward a point, holding the gas while under the
-// target speed (no target speed means flat out). A slower car right ahead
-// on our lane is passed on the clear side instead of tailgated.
-function driveToward(world, input, tx, ty, targetSpeed) {
-  const car = world.player.car;
-  input.held = new Set();
-  // Aim 200 px ahead toward the target, on the road's centre line — unless
-  // a slower car is right ahead on our lane, in which case aim 42 px to
-  // the clear side to pass it. The aim is fixed to the target's direction,
-  // never to the car's own heading, so it cannot spiral off the road.
-  const dx = tx - car.x;
-  const dy = ty - car.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const fx = dx / len;
-  const fy = dy / len;
-  const px = -fy;
-  const py = fx;
-  let pass = 0;
-  for (const other of world.cars) {
-    if (other === car) continue;
-    const rx = other.x - car.x;
-    const ry = other.y - car.y;
-    const ahead = rx * fx + ry * fy;
-    const side = rx * px + ry * py;
-    if (ahead > 0 && ahead < 150 && Math.abs(side) < 32) {
-      pass = side > 0 ? -42 : 42;
-      break;
+// Stay on a vertical road at roadX while driving: steer toward the line.
+// heading: -1 driving north, +1 driving south (steering flips with it).
+function roadDriver(roadX, heading) {
+  return (world) => {
+    const car = world.player.inCar;
+    if (!car) return blankInput();
+    const dx = car.x - roadX;
+    const needLeft = heading < 0 ? dx > 6 : dx < -6;
+    const needRight = heading < 0 ? dx < -6 : dx > 6;
+    return {
+      ...blankInput(),
+      up: true,
+      left: needLeft,
+      right: needRight,
+    };
+  };
+}
+
+export function applyShot(world, name) {
+  switch (name) {
+    case 'start': return shotStart(world);
+    case 'drive': return shotDrive(world);
+    case 'street': return shotStreet(world);
+    case 'chase': return shotChase(world);
+    default: return shotStart(world);
+  }
+}
+
+// Title screen over the living city: traffic and pedestrians have been
+// moving for a few seconds behind the title.
+function shotStart(world) {
+  world.screen = 'title';
+  run(world, 6, () => blankInput());
+  world.camera.x = clamp(world.player.x, CFG.viewW / 2, CFG.worldW - CFG.viewW / 2);
+  world.camera.y = clamp(world.player.y, CFG.viewH / 2, CFG.worldH - CFG.viewH / 2);
+}
+
+// Mission 1: Rico in the yellow taxi, driving north up the x=1400 road.
+function shotDrive(world) {
+  world.screen = 'play';
+  startMission(world, 0);
+  const taxi = world.cars.find((c) => c.kind === 'taxi');
+  world.player.inCar = taxi;
+  world.player.x = taxi.x;
+  world.player.y = taxi.y;
+  taxi.angle = -Math.PI / 2; // facing north
+  say(world, 'Mama Lou: Drive it up to the Neon Mile club. No scratching the paint.');
+  run(world, 3, roadDriver(1400, -1));
+}
+
+// Free roam on foot on the beach promenade: palms, sand, ocean, walkers.
+function shotStreet(world) {
+  world.screen = 'play';
+  world.missionIndex = 4; // free roam
+  world.missionStep = 0;
+  world.player.inCar = null;
+  world.player.x = 2900;
+  world.player.y = 1180;
+  world.player.angle = Math.PI / 2;
+  // A few extra walkers strolling the promenade.
+  for (let n = 0; n < 6; n++) {
+    const p = makePed(2860 + n * 22, 1020 + n * 55, world.rng);
+    world.peds.push(p);
+  }
+  run(world, 3, () => blankInput());
+}
+
+// Mission 3: three wanted stars, Rico in the white sports car doing ~58 mph
+// down the x=1400 road, two police cars chasing behind him.
+function shotChase(world) {
+  world.screen = 'play';
+  startMission(world, 2);
+  world.wanted = 3;
+  const sports = world.cars.find((c) => c.kind === 'sports');
+  sports.x = 1400;
+  sports.y = 600;
+  sports.angle = Math.PI / 2; // facing south, down the road
+  sports.speed = 0;
+  world.player.inCar = sports;
+  world.player.x = sports.x;
+  world.player.y = sports.y;
+  // Two police cars right behind him, already in pursuit.
+  const cop1 = makeCar('police', 1392, 480, Math.PI / 2, 'police', world.rng);
+  const cop2 = makeCar('police', 1416, 540, Math.PI / 2, 'police', world.rng);
+  cop1.speed = 480;
+  cop2.speed = 500;
+  world.police.push(cop1, cop2);
+  world.cars.push(cop1, cop2);
+  // Clear the chase corridor (the x=1400 road, y 200-2300) of traffic and
+  // pedestrians, so the run is a clean high-speed chase, not a traffic jam
+  // — and nobody wanders into the road and raises the wanted level mid-shot.
+  for (const car of world.cars) {
+    if (car.kind !== 'traffic') continue;
+    if (Math.abs(car.x - 1400) < 140 && car.y > 200 && car.y < 2300) {
+      let spot = randomRoadPoint(world.rng, world.city);
+      let guard = 0;
+      while (Math.abs(spot.x - 1400) < 300 && guard++ < 20) spot = randomRoadPoint(world.rng, world.city);
+      car.x = spot.x; car.y = spot.y;
     }
   }
-  const aimX = car.x + fx * 200 + px * pass;
-  const aimY = car.y + fy * 200 + py * pass;
-  const want = Math.atan2(aimY - car.y, aimX - car.x);
-  let d = want - car.angle;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
-  if (Math.abs(d) < 1.0 && (targetSpeed === undefined || car.speed < targetSpeed)) {
-    input.held.add('up');
+  for (const ped of world.peds) {
+    if (Math.abs(ped.x - 1400) < 110 && ped.y > 200 && ped.y < 2300) {
+      let spot = randomSidewalkPoint(world.rng, world.city);
+      let guard = 0;
+      while (Math.abs(spot.x - 1400) < 300 && guard++ < 20) spot = randomSidewalkPoint(world.rng, world.city);
+      ped.x = spot.x; ped.y = spot.y;
+      ped.target = null;
+    }
   }
-  if (d > 0.12) input.held.add('right');
-  else if (d < -0.12) input.held.add('left');
-}
-
-function stepN(world, input, n) {
-  for (let i = 0; i < n; i += 1) {
-    stepWorld(world, input, STEP);
-    input.endFrame();
-  }
-}
-
-function putPlayerInCar(world, car, speed) {
-  world.player.car = car;
-  car.driver = 'player';
-  world.player.x = car.x;
-  world.player.y = car.y;
-  world.player.angle = car.angle;
-  car.speed = speed || 0;
-}
-
-function stageChase(seed) {
-  const world = createWorld(seed);
-  world.state = 'play';
-  startMission(world, 2); // Getaway: the job starts with 2 wanted stars
-  world.wanted = 3;
-  const car = world.sportsCar;
-  car.x = 1400;
-  car.y = 1900;
-  car.angle = -Math.PI / 2;
-  putPlayerInCar(world, car, 480);
-  world.dialogue = {
-    lines: ["Mama Lou: Lose them, Rico — all of them — then slip to the safehouse."],
-    index: 0,
-    timer: 7,
-  };
-  // Two police cars visibly chasing right behind the player.
-  for (const [x, y] of [[1400, 2010], [1400, 2140]]) {
-    const cop = makeCar('police', x, y, -Math.PI / 2, world.rng);
-    cop.driver = 'police';
-    cop.leaveTimer = 0;
-    cop.speed = 450;
-    world.policeCars.push(cop);
-    world.cars.push(cop);
-  }
-  const input = new ShotInput();
-  for (let i = 0; i < 90; i += 1) {
-    driveToward(world, input, 1400, 600, 485); // hold ~58 mph up the road
-    stepWorld(world, input, STEP);
-    input.endFrame();
-  }
-  return world;
-}
-
-function stageDrive(seed) {
-  const world = createWorld(seed);
-  world.state = 'play';
-  startMission(world, 0);
-  const taxi = world.taxi;
-  putPlayerInCar(world, taxi, 0);
-  world.wanted = 1;
-  world.missionStep = 1;
-  world.marker = SPOTS.club;
-  world.dialogue = {
-    lines: ["Mama Lou: Good. Now the Neon Mile club — north side, follow the marker."],
-    index: 0,
-    timer: 7,
-  };
-  const input = new ShotInput();
-  for (let i = 0; i < 180; i += 1) {
-    driveToward(world, input, 1400, 300);
-    stepWorld(world, input, STEP);
-    input.endFrame();
-  }
-  return world;
-}
-
-function stageStreet(seed) {
-  const world = createWorld(seed);
-  world.state = 'play';
-  startMission(world, 0);
-  world.player.x = 2920;
-  world.player.y = 1200;
-  world.player.angle = 0; // facing the ocean
-  // Bring a few pedestrians onto the promenade for the shot.
-  for (let i = 0; i < 6; i += 1) {
-    const ped = world.peds[i];
-    ped.x = 2880 + i * 22;
-    ped.y = 1100 + (i % 3) * 90;
-    ped.state = 'walk';
-    ped.target = { x: 2900 + (i % 2) * 60, y: 1150 + i * 25 };
-  }
-  stepN(world, new ShotInput(), 120);
-  return world;
-}
-
-function stageStart(seed) {
-  const world = createWorld(seed);
-  // Title state: the city lives behind the menu (traffic and pedestrians).
-  stepN(world, new ShotInput(), 300);
-  return world;
-}
-
-export function runShot(name, seed) {
-  if (name === 'chase') return stageChase(seed);
-  if (name === 'drive') return stageDrive(seed);
-  if (name === 'street') return stageStreet(seed);
-  return stageStart(seed);
+  say(world, 'Mama Lou: Do not get busted. I am not bailing you out twice.');
+  // Drive south for two and a half seconds: the sports car tops out near
+  // 58 mph, stays inside the city, and both chasers stay in frame.
+  run(world, 2.5, roadDriver(1400, 1));
+  // The wanted system may have spawned a third patrol car far away; keep
+  // exactly the two chasers in frame for a clean shot.
+  const keep = new Set([cop1, cop2]);
+  world.police = world.police.filter((c) => keep.has(c));
+  world.cars = world.cars.filter((c) => c.kind !== 'police' || keep.has(c));
 }

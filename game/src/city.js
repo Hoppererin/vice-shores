@@ -1,209 +1,229 @@
-// The city of Vice Shores: a fixed road grid, the blocks between the roads,
-// the beach and ocean on the east edge, a park and a plaza, and the road
-// graph traffic drives on. Everything comes from one seeded RNG, so a seed
-// always builds the same city.
-import {
-  BEACH_X, DISTRICTS, OCEAN_X, PALETTE, PARK, PLAZA, ROADS_X, ROADS_Y, ROAD_W, WALK_W, WORLD,
-} from './config.js';
-import { clamp, dist } from './random.js';
+// The city of Vice Shores: a fixed road grid, blocks of pastel buildings,
+// a beach and ocean on the east edge, a park with a pond, a plaza with a
+// fountain, and the road graph the traffic drives on. Everything is built
+// from the world's seeded RNG, so a seed always builds the same city.
 
-const HALF_ROAD = ROAD_W / 2;
+import { CFG } from './config.js';
+import { chance, clamp, mulberry32, pick, rand, randInt } from './random.js';
 
-function rectsOverlap(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+// Build the whole city for a seed (or a ready rng stream). Returns the city
+// object the world keeps.
+export function buildCity(seed) {
+  const stream = typeof seed === 'function' ? seed : mulberry32(typeof seed === 'number' ? seed : 7);
+  const city = {
+    seed,
+    buildings: [],
+    trees: [],
+    palms: [],
+    nodes: [],
+    edges: [],
+    blocks: 0,
+  };
+
+  buildRoadGraph(city);
+  buildBlocks(city, stream);
+  scatterTrees(city, stream);
+  plantPalms(city, stream);
+  return city;
 }
 
-function onRoadStrip(x, y, margin) {
-  for (const rx of ROADS_X) {
-    if (Math.abs(x - rx) < HALF_ROAD + WALK_W + margin) return true;
+// Intersections at every road crossing, edges between neighbours.
+function buildRoadGraph(city) {
+  const { roadXs, roadYs } = CFG;
+  const index = new Map();
+  for (const y of roadYs) {
+    for (const x of roadXs) {
+      const id = city.nodes.length;
+      city.nodes.push({ id, x, y, links: [] });
+      index.set(x + ',' + y, id);
+    }
   }
-  for (const ry of ROADS_Y) {
-    if (Math.abs(y - ry) < HALF_ROAD + WALK_W + margin) return true;
+  const link = (a, b) => {
+    city.nodes[a].links.push(b);
+    city.nodes[b].links.push(a);
+    city.edges.push([a, b]);
+  };
+  for (let j = 0; j < roadYs.length; j++) {
+    for (let i = 0; i < roadXs.length; i++) {
+      const here = index.get(roadXs[i] + ',' + roadYs[j]);
+      if (i + 1 < roadXs.length) link(here, index.get(roadXs[i + 1] + ',' + roadYs[j]));
+      if (j + 1 < roadYs.length) link(here, index.get(roadXs[i] + ',' + roadYs[j + 1]));
+    }
+  }
+}
+
+// One block sits between four roads. Fill it with 1-4 buildings, or leave
+// it an empty lot. The park and plaza blocks get their features instead.
+function buildBlocks(city, rng) {
+  const { roadXs, roadYs, walkHalf, park, plaza } = CFG;
+  const roofColors = CFG.colors.buildingRoof;
+  for (let j = 0; j < roadYs.length - 1; j++) {
+    for (let i = 0; i < roadXs.length - 1; i++) {
+      const x0 = roadXs[i] + walkHalf;
+      const x1 = roadXs[i + 1] - walkHalf;
+      const y0 = roadYs[j] + walkHalf;
+      const y1 = roadYs[j + 1] - walkHalf;
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      city.blocks++;
+      if (Math.abs(cx - park.x) < 200 && Math.abs(cy - park.y) < 200) continue; // park
+      if (Math.abs(cx - plaza.x) < 200 && Math.abs(cy - plaza.y) < 200) continue; // plaza
+      if (chance(rng, 0.12)) continue; // empty lot: yard / parking patch
+      const count = randInt(rng, 1, 4);
+      // 2x2 sub-grid slots inside the block, shuffled by the stream.
+      const slots = [
+        [x0 + 8, y0 + 8], [x1 - 8, y0 + 8],
+        [x0 + 8, y1 - 8], [x1 - 8, y1 - 8],
+      ];
+      for (let s = slots.length - 1; s > 0; s--) {
+        const k = Math.floor(rng() * (s + 1));
+        [slots[s], slots[k]] = [slots[k], slots[s]];
+      }
+      for (let n = 0; n < count; n++) {
+        const [ax, ay] = slots[n];
+        const w = rand(rng, 72, 108);
+        const h = rand(rng, 72, 108);
+        const bx = clamp(ax - w / 2, x0, x1 - w);
+        const by = clamp(ay - h / 2, y0, y1 - h);
+        city.buildings.push({
+          x: bx, y: by, w, h,
+          color: pick(rng, roofColors),
+          lift: randInt(rng, 9, 17), // fake-height drop, down-right
+          ventX: rand(rng, 0.2, 0.6),
+          ventY: rand(rng, 0.2, 0.6),
+        });
+      }
+    }
+  }
+}
+
+// About ninety ordinary trees on grass, never on a road or in a building.
+function scatterTrees(city, rng) {
+  let placed = 0;
+  let guard = 0;
+  while (placed < 90 && guard++ < 3000) {
+    const x = rand(rng, 60, CFG.sandX - 60);
+    const y = rand(rng, 60, CFG.worldH - 60);
+    if (onRoad(x, y)) continue;
+    if (insideBuilding(city, x, y, 20)) continue;
+    if (nearParkOrPlaza(x, y, 30)) continue;
+    city.trees.push({ x, y, r: rand(rng, 9, 15), shade: rand(rng, 0, 1) });
+    placed++;
+  }
+  // A ring of trees around the park pond.
+  for (let n = 0; n < 14; n++) {
+    const a = (n / 14) * Math.PI * 2 + rand(rng, -0.2, 0.2);
+    const r = rand(rng, 95, 150);
+    city.trees.push({
+      x: CFG.park.x + Math.cos(a) * r,
+      y: CFG.park.y + Math.sin(a) * r,
+      r: rand(rng, 10, 15), shade: rand(rng, 0, 1),
+    });
+  }
+}
+
+// Palm trees in a line down the sand strip.
+function plantPalms(city, rng) {
+  for (let y = 120; y < CFG.worldH - 80; y += rand(rng, 130, 220)) {
+    city.palms.push({ x: rand(rng, 2860, 2990), y, r: rand(rng, 11, 15) });
+  }
+}
+
+// Is a point on asphalt (within the road bands)?
+export function onRoad(x, y) {
+  const { roadXs, roadYs, roadHalf } = CFG;
+  for (const rx of roadXs) if (Math.abs(x - rx) <= roadHalf) return true;
+  for (const ry of roadYs) if (Math.abs(y - ry) <= roadHalf) return true;
+  return false;
+}
+
+// Is a point inside a building (with a margin)?
+export function insideBuilding(city, x, y, margin = 0) {
+  for (const b of city.buildings) {
+    if (x > b.x - margin && x < b.x + b.w + margin &&
+        y > b.y - margin && y < b.y + b.h + margin) return true;
   }
   return false;
 }
 
-function buildRoadGraph() {
-  const nodes = [];
-  for (let row = 0; row < ROADS_Y.length; row += 1) {
-    for (let col = 0; col < ROADS_X.length; col += 1) {
-      nodes.push({ x: ROADS_X[col], y: ROADS_Y[row], neighbors: [] });
-    }
-  }
-  const cols = ROADS_X.length;
-  const index = (row, col) => row * cols + col;
-  for (let row = 0; row < ROADS_Y.length; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const here = index(row, col);
-      if (col > 0) nodes[here].neighbors.push(index(row, col - 1));
-      if (col < cols - 1) nodes[here].neighbors.push(index(row, col + 1));
-      if (row > 0) nodes[here].neighbors.push(index(row - 1, col));
-      if (row < ROADS_Y.length - 1) nodes[here].neighbors.push(index(row + 1, col));
-    }
-  }
-  return nodes;
+function nearParkOrPlaza(x, y, margin) {
+  const { park, plaza } = CFG;
+  const inRect = (r) => x > r.x - r.w / 2 - margin && x < r.x + r.w / 2 + margin &&
+    y > r.y - r.h / 2 - margin && y < r.y + r.h / 2 + margin;
+  return inRect(park) || inRect(plaza);
 }
 
-function buildBuildings(rng) {
-  const buildings = [];
-  const keepOut = [
-    { x: PARK.x - 20, y: PARK.y - 20, w: PARK.w + 40, h: PARK.h + 40 },
-    { x: PLAZA.x - 20, y: PLAZA.y - 20, w: PLAZA.w + 40, h: PLAZA.h + 40 },
-  ];
-  const edgeX = [WALK_W, ...ROADS_X.map((x) => x + HALF_ROAD + WALK_W)];
-  const edgeY = [WALK_W, ...ROADS_Y.map((y) => y + HALF_ROAD + WALK_W)];
-  const farX = [...ROADS_X.map((x) => x - HALF_ROAD - WALK_W), BEACH_X - WALK_W];
-  const farY = [...ROADS_Y.map((y) => y - HALF_ROAD - WALK_W), WORLD.height - WALK_W];
-  for (let col = 0; col < ROADS_X.length; col += 1) {
-    for (let row = 0; row < ROADS_Y.length; row += 1) {
-      const bx0 = edgeX[col];
-      const bx1 = farX[col];
-      const by0 = edgeY[row];
-      const by1 = farY[row];
-      const bw = bx1 - bx0;
-      const bh = by1 - by0;
-      if (bw < 90 || bh < 90) continue;
-      // Split a big block into up to four lots; small blocks get one or two.
-      const cols2 = bw > 230 ? 2 : 1;
-      const rows2 = bh > 230 ? 2 : 1;
-      for (let sx = 0; sx < cols2; sx += 1) {
-        for (let sy = 0; sy < rows2; sy += 1) {
-          if (rng.chance(0.22)) continue; // empty lot: yard or parking patch
-          const lotW = bw / cols2;
-          const lotH = bh / rows2;
-          const w = Math.round(rng.range(70, Math.max(80, lotW - 24)));
-          const h = Math.round(rng.range(70, Math.max(80, lotH - 24)));
-          const x = Math.round(bx0 + sx * lotW + rng.range(8, Math.max(9, lotW - w - 8)));
-          const y = Math.round(by0 + sy * lotH + rng.range(8, Math.max(9, lotH - h - 8)));
-          const building = {
-            x, y, w, h,
-            color: rng.pick(PALETTE.roofs),
-            height: rng.int(10, 26),
-          };
-          if (keepOut.some((zone) => rectsOverlap(building, zone))) continue;
-          if (building.x + building.w > BEACH_X) continue;
-          buildings.push(building);
-        }
-      }
-    }
-  }
-  return buildings;
-}
-
-function buildTrees(rng, buildings) {
-  const trees = [];
-  const palms = [];
-  let guard = 0;
-  while (trees.length < 90 && guard < 900) {
-    guard += 1;
-    const x = rng.range(40, BEACH_X - 40);
-    const y = rng.range(40, WORLD.height - 40);
-    if (onRoadStrip(x, y, 4)) continue;
-    if (buildings.some((b) => x > b.x - 14 && x < b.x + b.w + 14 && y > b.y - 14 && y < b.y + b.h + 14)) continue;
-    trees.push({ x: Math.round(x), y: Math.round(y), size: rng.range(13, 20) });
-  }
-  // Park trees, kept out of the pond.
-  for (let i = 0; i < 12; i += 1) {
-    const x = PARK.x + rng.range(20, PARK.w - 20);
-    const y = PARK.y + rng.range(20, PARK.h - 20);
-    if (dist(x, y, PARK.x + PARK.w / 2, PARK.y + PARK.h / 2) < 90) continue;
-    trees.push({ x: Math.round(x), y: Math.round(y), size: rng.range(14, 20) });
-  }
-  // Palms marching down the sand.
-  for (let y = 120; y < WORLD.height - 80; y += rng.range(90, 150)) {
-    palms.push({ x: Math.round(rng.range(2865, 2995)), y: Math.round(y), size: rng.range(15, 21) });
-  }
-  return { trees, palms };
-}
-
-export function generateCity(rng) {
-  const nodes = buildRoadGraph();
-  const buildings = buildBuildings(rng);
-  const { trees, palms } = buildTrees(rng, buildings);
-  return {
-    nodes, buildings, trees, palms,
-    park: PARK,
-    plaza: PLAZA,
-    pond: { x: PARK.x + PARK.w / 2, y: PARK.y + PARK.h / 2, rx: 72, ry: 50 },
-    fountain: { x: PLAZA.x + PLAZA.w / 2, y: PLAZA.y + PLAZA.h / 2, r: 42 },
-  };
-}
-
-// Push a circle out of every building it overlaps. Returns true on a hit.
+// Push a circle out of every building it overlaps. Returns true on contact.
 export function collideBuildings(city, body, radius) {
   let hit = false;
-  for (let pass = 0; pass < 2; pass += 1) {
-    for (const b of city.buildings) {
-      const nearX = clamp(body.x, b.x, b.x + b.w);
-      const nearY = clamp(body.y, b.y, b.y + b.h);
-      const dx = body.x - nearX;
-      const dy = body.y - nearY;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= radius * radius) continue;
-      hit = true;
-      if (d2 > 0.01) {
-        const d = Math.sqrt(d2);
-        body.x = nearX + (dx / d) * radius;
-        body.y = nearY + (dy / d) * radius;
-      } else {
-        // Centre inside the rect: shove out along the shallowest side.
-        const left = body.x - b.x + radius;
-        const right = b.x + b.w - body.x + radius;
-        const top = body.y - b.y + radius;
-        const bottom = b.y + b.h - body.y + radius;
-        const min = Math.min(left, right, top, bottom);
-        if (min === left) body.x = b.x - radius;
-        else if (min === right) body.x = b.x + b.w + radius;
-        else if (min === top) body.y = b.y - radius;
-        else body.y = b.y + b.h + radius;
-      }
+  for (const b of city.buildings) {
+    const cx = clamp(body.x, b.x, b.x + b.w);
+    const cy = clamp(body.y, b.y, b.y + b.h);
+    const dx = body.x - cx;
+    const dy = body.y - cy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= radius * radius) continue;
+    hit = true;
+    if (d2 > 0.0001) {
+      const d = Math.sqrt(d2);
+      body.x = cx + (dx / d) * radius;
+      body.y = cy + (dy / d) * radius;
+    } else {
+      // Dead centre: shove out along the smallest penetration axis.
+      const left = body.x - b.x + radius;
+      const right = b.x + b.w - body.x + radius;
+      const top = body.y - b.y + radius;
+      const bottom = b.y + b.h - body.y + radius;
+      const m = Math.min(left, right, top, bottom);
+      if (m === left) body.x = b.x - radius;
+      else if (m === right) body.x = b.x + b.w + radius;
+      else if (m === top) body.y = b.y - radius;
+      else body.y = b.y + b.h + radius;
     }
   }
   return hit;
 }
 
-export function nearestNode(city, x, y) {
-  let best = 0;
-  let bestD = Infinity;
-  for (let i = 0; i < city.nodes.length; i += 1) {
-    const d = (city.nodes[i].x - x) ** 2 + (city.nodes[i].y - y) ** 2;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  }
-  return best;
+// A random point on the asphalt, biased to intersections.
+export function randomRoadPoint(rng, city) {
+  const node = pick(rng, city.nodes);
+  return { x: node.x + rand(rng, -20, 20), y: node.y + rand(rng, -20, 20) };
 }
 
-// A random point on a road centre line.
-export function randomRoadPoint(rng) {
-  if (rng.chance(0.5)) {
-    return { x: rng.pick(ROADS_X), y: rng.range(60, WORLD.height - 60) };
-  }
-  return { x: rng.range(60, BEACH_X - 60), y: rng.pick(ROADS_Y) };
-}
-
-// A random point on a sidewalk, just off a road.
-export function randomSidewalkPoint(rng) {
-  if (rng.chance(0.5)) {
-    const side = rng.chance(0.5) ? 1 : -1;
+// A random point on a sidewalk: beside a road, just off the asphalt.
+export function randomSidewalkPoint(rng, city) {
+  const vertical = chance(rng, 0.5);
+  if (vertical) {
+    const rx = pick(rng, CFG.roadXs);
+    const side = chance(rng, 0.5) ? 1 : -1;
     return {
-      x: rng.pick(ROADS_X) + side * (HALF_ROAD + WALK_W / 2),
-      y: rng.range(60, WORLD.height - 60),
+      x: rx + side * (CFG.roadHalf + 13),
+      y: rand(rng, 80, CFG.worldH - 80),
     };
   }
-  const side = rng.chance(0.5) ? 1 : -1;
+  const ry = pick(rng, CFG.roadYs);
+  const side = chance(rng, 0.5) ? 1 : -1;
   return {
-    x: rng.range(60, BEACH_X - 60),
-    y: rng.pick(ROADS_Y) + side * (HALF_ROAD + WALK_W / 2),
+    x: rand(rng, 80, CFG.sandX - 80),
+    y: ry + side * (CFG.roadHalf + 13),
   };
 }
 
+// District name for a world position.
 export function districtAt(x, y) {
-  if (x >= OCEAN_X) return 'Ocean';
-  if (x >= BEACH_X) return 'Vice Beach';
-  for (const zone of DISTRICTS) {
-    if (x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h) return zone.name;
+  for (const d of CFG.districts) {
+    if (d.test(x, y)) return d.name;
   }
   return 'Vice Shores';
+}
+
+// Nearest road-graph node to a point.
+export function nearestNode(city, x, y) {
+  let best = city.nodes[0];
+  let bestD = Infinity;
+  for (const n of city.nodes) {
+    const d = (n.x - x) * (n.x - x) + (n.y - y) * (n.y - y);
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  return best;
 }

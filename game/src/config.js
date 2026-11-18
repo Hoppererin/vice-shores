@@ -1,78 +1,104 @@
-// Vice Shores — every tuning number, colour and place name in one place.
-// The world is a fixed 3200 x 2400 px city; the renderer shows it through a
-// 1280 x 720 logical canvas that scales to the window, so no rule here
-// depends on the screen size.
-export const WORLD = { width: 3200, height: 2400 };
-export const VIEW = { width: 1280, height: 720 };
-export const STEP = 1 / 60;
-export const SAVE_KEY = 'vice-shores.save.v1';
+// Vice Shores — every tuning number, colour and name in one place, so the
+// rest of the game reads like a description of the city instead of a pile
+// of magic numbers.
 
-// Roads: vertical lines at these x, horizontal lines at these y.
-export const ROADS_X = [200, 600, 1000, 1400, 1800, 2200, 2600];
-export const ROADS_Y = [200, 600, 1000, 1400, 1800, 2200];
-export const ROAD_W = 96; // asphalt width
-export const WALK_W = 26; // sidewalk strip on each side of a road
+export const CFG = {
+  // World and view
+  worldW: 3200,
+  worldH: 2400,
+  viewW: 1280,
+  viewH: 720,
 
-export const BEACH_X = 2840; // sand starts here
-export const OCEAN_X = 3020; // water starts here
-export const PARK = { x: 1430, y: 1030, w: 340, h: 340 };
-export const PLAZA = { x: 1030, y: 1830, w: 340, h: 340 };
+  // Roads
+  roadXs: [200, 600, 1000, 1400, 1800, 2200, 2600],
+  roadYs: [200, 600, 1000, 1400, 1800, 2200],
+  roadHalf: 48, // half the asphalt width
+  walkHalf: 74, // asphalt + sidewalk: blocks start beyond this
 
-export const PLAYER = {
-  radius: 13,
+  // Beach and ocean (east edge)
+  sandX: 2840,
+  oceanX: 3020,
+
+  // Park and plaza (block centres)
+  park: { x: 1430, y: 1030, w: 340, h: 340 },
+  plaza: { x: 1030, y: 1830, w: 340, h: 340 },
+
+  // Player on foot
   walkSpeed: 175,
   runSpeed: 265,
-  punchRange: 38,
-  punchArc: 1.1,
-  health: 100,
-};
+  playerRadius: 14,
+  playerHealth: 100,
 
-export const CAR = {
-  accel: 420,
-  brake: 620,
-  maxReverse: 160,
-  topSpeed: 540,
+  // Driving
+  carAccel: 420,
+  carTopSpeed: 540,
   sportsTopSpeed: 640,
-  turnRate: 2.6,
-  radius: 17,
+  carReverseMax: 160,
+  carTurn: 2.6,
+  carBrake: 700,
+
+  // Traffic and pedestrians
+  trafficCount: 14,
+  trafficSpeed: 150,
+  pedCount: 42,
+  pedSpeed: 55,
+  pedFleeSpeed: 130,
+
+  // Wanted
+  wantedDecaySeconds: 26,
+  maxPoliceCars: 4,
+  bustHoldSeconds: 1.4,
+
+  // Missions
+  missionTimeLimit: 75,
+  markerRadius: 70,
+
+  // Save
+  saveKey: 'vice-shores.save.v1',
+  saveEverySeconds: 20,
+
+  // Palette
+  colors: {
+    grass: '#79b657',
+    grassDark: '#6da84e',
+    road: '#333a45',
+    roadEdge: '#2b313b',
+    sidewalk: '#c9c2b4',
+    line: '#e8c33c',
+    sand: '#ecd9a0',
+    ocean: '#3f8fb5',
+    oceanDeep: '#2f7ba3',
+    parkGrass: '#5da24a',
+    pond: '#7cc4e8',
+    plaza: '#b9b2a4',
+    fountain: '#8fd0ee',
+    buildingRoof: ['#d98a6a', '#7fa8c9', '#c9a86a', '#b07ba8', '#8fb08a', '#c97b7b', '#6a8fb0', '#d9b06a'],
+    buildingSide: '#00000033',
+    tree: '#3f8f3a',
+    treeDark: '#357a31',
+    palm: '#4da34a',
+    trunk: '#8a6a4a',
+  },
+
+  districts: [
+    // name, test on x/y — first match wins
+    { name: 'Ocean', test: (x) => x >= 3020 },
+    { name: 'Vice Beach', test: (x) => x >= 2840 },
+    { name: 'Marina Bay', test: (x, y) => x >= 1400 && y < 1000 },
+    { name: 'Old Town', test: (x, y) => x < 1400 && y < 1000 },
+    { name: 'Porto Verde', test: (x, y) => x >= 1800 && y >= 1800 },
+    { name: 'Neon Mile', test: (x, y) => x < 1400 && y >= 1000 },
+    { name: 'Palm Court', test: () => true },
+  ],
 };
 
-export const TRAFFIC_COUNT = 14;
-export const PED_COUNT = 42;
-export const TRAFFIC_SPEED = 150;
-export const PED_SPEED = 55;
-export const PED_FLEE_SPEED = 135;
-
-export const WANTED_DECAY_SECONDS = 26;
-export const MAX_POLICE_CARS = 4;
-export const BUST_HOLD_SECONDS = 1.4;
-export const AUTOSAVE_SECONDS = 20;
-
-export const MISSION_TIMER = 75; // seconds for the timed delivery
-
-export const DISTRICTS = [
-  { name: 'Porto Verde', x: 0, y: 0, w: 1150, h: 1150 },
-  { name: 'Old Town', x: 1150, y: 0, w: 1150, h: 1150 },
-  { name: 'Neon Mile', x: 0, y: 1150, w: 1150, h: 1250 },
-  { name: 'Marina Bay', x: 2300, y: 0, w: 540, h: 1150 },
-  { name: 'Palm Court', x: 1150, y: 1150, w: 1690, h: 1250 },
-];
-
-export const PALETTE = {
-  grass: '#7fae62',
-  grassDark: '#74a258',
-  sand: '#e8d39a',
-  ocean: '#2f7fc4',
-  oceanDeep: '#256aa8',
-  road: '#3c3f46',
-  roadLine: '#e8d44d',
-  sidewalk: '#9aa0a8',
-  plaza: '#b9b3a4',
-  park: '#5f9e4e',
-  pond: '#4d9ec9',
-  buildingSide: 'rgba(0,0,0,0.28)',
-  roofs: ['#e07856', '#e8a34c', '#7fb3d5', '#c98bb0', '#8fc97f', '#d5c06a', '#9a8fd0', '#e08a7a'],
-  tree: '#3f7d3a',
-  treeLight: '#57a04e',
-  palm: '#4c9a4a',
+// Car models: length/width in px, top speed multiplier, palette.
+export const CAR_MODELS = {
+  sedan: { len: 52, wid: 26, top: 1.0, colors: ['#5a7fb0', '#b05050', '#7a7a7a', '#4a8a6a'] },
+  coupe: { len: 48, wid: 24, top: 1.05, colors: ['#c05050', '#5050a0', '#c0a050'] },
+  taxi: { len: 52, wid: 26, top: 1.0, colors: ['#f2c230'] },
+  van: { len: 62, wid: 28, top: 0.85, colors: ['#8a8a8a', '#6a7a8a', '#a08a6a'] },
+  sports: { len: 50, wid: 25, top: 1.18, colors: ['#e8e8e8', '#d03030', '#3080d0'] },
+  pickup: { len: 56, wid: 27, top: 0.95, colors: ['#7a5a3a', '#3a6a5a', '#8a3a3a'] },
+  police: { len: 54, wid: 27, top: 1.12, colors: ['#2a4a8a'] },
 };

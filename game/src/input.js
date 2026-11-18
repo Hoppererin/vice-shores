@@ -1,67 +1,83 @@
-// Keyboard input. Held keys give a steering direction; one-shot presses
-// (enter a car, punch, start, pause) are queued by key code and taken once,
-// so a press between two frames is never lost and never counted twice.
-// The world only ever sees this small interface, which the headless tests
-// can fake with a plain object of the same shape.
-const DIRECTIONS = {
-  ArrowUp: 'up', KeyW: 'up',
-  ArrowDown: 'down', KeyS: 'down',
-  ArrowLeft: 'left', KeyA: 'left',
-  ArrowRight: 'right', KeyD: 'right',
+// Keyboard + pointer input. In the browser it listens for keys and turns
+// them into a plain state object the world steps from; in Node (smoke
+// tests) the same shape is built by hand, so world.js never touches the DOM.
+//
+// Held keys: up/down/left/right/run. One-shot actions, true for exactly the
+// step they were pressed in: enter (E), punch (F), pause (P), confirm
+// (Enter). The main loop clears the one-shots after each fixed step.
+
+const KEYMAP = {
+  KeyW: 'up', ArrowUp: 'up',
+  KeyS: 'down', ArrowDown: 'down',
+  KeyA: 'left', ArrowLeft: 'left',
+  KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'run', ShiftRight: 'run',
+  KeyE: 'enter',
+  KeyF: 'punch',
+  KeyP: 'pause',
+  Enter: 'confirm',
 };
 
-export function createInput(target) {
-  const held = new Set();
-  const pressed = new Set();
-
-  function onKeyDown(event) {
-    const dir = DIRECTIONS[event.code];
-    if (dir) {
-      held.add(dir);
-      event.preventDefault();
-      return;
-    }
-    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') {
-      held.add('run');
-      return;
-    }
-    if (!event.repeat) pressed.add(event.code);
-    if (['Space', 'Enter', 'KeyE', 'KeyF', 'KeyP'].includes(event.code)) event.preventDefault();
-  }
-
-  function onKeyUp(event) {
-    const dir = DIRECTIONS[event.code];
-    if (dir) held.delete(dir);
-    if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') held.delete('run');
-  }
-
-  function onBlur() {
-    held.clear();
-  }
-
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('blur', onBlur);
-  if (target) {
-    target.addEventListener('pointerdown', () => pressed.add('Enter'));
-  }
-
-  return {
-    isDown(name) {
-      return held.has(name);
-    },
-    wasPressed(code) {
-      return pressed.has(code);
-    },
-    axisX() {
-      return (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
-    },
-    axisY() {
-      return (held.has('down') ? 1 : 0) - (held.has('up') ? 1 : 0);
-    },
-    // Drop the one-shot presses at the end of each frame.
-    endFrame() {
-      pressed.clear();
-    },
+export function createInput() {
+  const input = {
+    up: false, down: false, left: false, right: false, run: false,
+    enter: false, punch: false, pause: false, confirm: false,
+    // Pointer position in canvas pixels, for the title-screen click.
+    pointerX: 0, pointerY: 0, pointerDown: false,
+    attached: false,
   };
+
+  // Attach DOM listeners only where a DOM exists.
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    const down = (e) => {
+      const name = KEYMAP[e.code];
+      if (!name) return;
+      if (['up', 'down', 'left', 'right'].includes(name)) e.preventDefault();
+      if (name === 'enter' || name === 'punch' || name === 'pause' || name === 'confirm') {
+        if (!e.repeat) input[name] = true;
+      } else {
+        input[name] = true;
+      }
+      unlockAudioOnce();
+    };
+    const up = (e) => {
+      const name = KEYMAP[e.code];
+      if (!name) return;
+      if (name === 'enter' || name === 'punch' || name === 'pause' || name === 'confirm') return;
+      input[name] = false;
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', () => {
+      input.up = input.down = input.left = input.right = input.run = false;
+    });
+    input.attached = true;
+  }
+  return input;
+}
+
+// One-shot flags are consumed by the world step; call after each step.
+export function clearPressed(input) {
+  input.enter = false;
+  input.punch = false;
+  input.pause = false;
+  input.confirm = false;
+  input.pointerDown = false;
+}
+
+// A blank input for tests: every key up, no action pressed.
+export function blankInput() {
+  return {
+    up: false, down: false, left: false, right: false, run: false,
+    enter: false, punch: false, pause: false, confirm: false,
+    pointerX: 0, pointerY: 0, pointerDown: false,
+  };
+}
+
+// Audio unlocks on the first key press; input.js owns the hook so main.js
+// does not have to wire it. The audio module registers the real handler.
+let unlockAudioOnce = () => {};
+export function onFirstKey(fn) {
+  const prev = unlockAudioOnce;
+  unlockAudioOnce = () => { prev(); fn(); unlockAudioOnce = () => {}; };
 }

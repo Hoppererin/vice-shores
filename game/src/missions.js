@@ -1,191 +1,196 @@
-// Mama Lou's four jobs. Each mission knows its briefing lines, its steps,
-// its cash reward and where its marker points; the world asks this module
-// to start a job and to check, every step, whether the current step is done.
-import { MISSION_TIMER } from './config.js';
+// Mama Lou's four jobs. Each mission is a small state machine: a briefing
+// (shown as dialogue), a chain of steps with a world position to reach, and
+// a cash reward. Completing a job advances the story; failing the timed
+// delivery lets the player retry the same job with ENTER.
+
+import { CFG } from './config.js';
 import { dist } from './random.js';
-import { addWanted } from './police.js';
 
 export const MISSIONS = [
   {
-    title: 'First Fare',
+    name: 'First Fare',
     reward: 150,
     briefing: [
       "Mama Lou: Rico, baby, you're back. First fare's easy — take the yellow taxi by the plaza.",
-      'Mama Lou: Then drive it up to the Neon Mile club. Don\'t scratch my paint.',
+      'Mama Lou: Drive it up to the Neon Mile club. No scratching the paint, you hear me?',
     ],
-    objective: (w) => (w.missionStep === 0
-      ? 'Get in the yellow taxi by the plaza'
-      : 'Drive the taxi to the Neon Mile club'),
+    steps: [
+      { text: 'Get in the yellow taxi by the plaza', at: { x: 1400, y: 2000 }, needCar: 'taxi', radius: 60 },
+      { text: 'Drive to the Neon Mile club', at: { x: 600, y: 1000 }, radius: 70 },
+    ],
   },
   {
-    title: 'Package Run',
+    name: 'Package Run',
     reward: 300,
     briefing: [
-      'Mama Lou: A package is waiting at the Marina docks. Pick it up, no questions.',
-      'Mama Lou: Deliver it to the Palm Court hotel. Seventy-five seconds, Rico. Tick tock.',
+      'Mama Lou: A package is waiting at the Marina docks. No questions, no peeking.',
+      'Mama Lou: Get it to the Palm Court hotel in 75 seconds. The client hates waiting.',
     ],
-    objective: (w) => (w.missionStep === 0
-      ? 'Pick up the package at the Marina docks'
-      : 'Deliver the package to the Palm Court hotel'),
+    steps: [
+      { text: 'Pick up the package at the Marina docks', at: { x: 2600, y: 200 }, radius: 60 },
+      { text: 'Deliver the package to the Palm Court hotel', at: { x: 1800, y: 1800 }, radius: 70, timed: 75 },
+    ],
   },
   {
-    title: 'Getaway',
+    name: 'Getaway',
     reward: 500,
     briefing: [
-      'Mama Lou: That last job went loud, Rico. The cops are already on you.',
-      'Mama Lou: Lose them — all of them — then slip to the safehouse in Old Town.',
+      'Mama Lou: The job went loud, Rico. Two stars and every cop in Vice Shores knows your face.',
+      'Mama Lou: Lose them first, then slip to the safehouse in Old Town. Do not get busted.',
     ],
-    objective: (w) => (w.missionStep === 0
-      ? 'Lose the police — get your wanted level to zero'
-      : 'Reach the safehouse in Old Town'),
+    steps: [
+      { text: 'Lose the police (get your wanted level to zero)', at: null, loseHeat: true },
+      { text: 'Reach the safehouse in Old Town', at: { x: 1400, y: 600 }, radius: 70 },
+    ],
   },
   {
-    title: 'The Big Score',
+    name: 'The Big Score',
     reward: 1000,
     briefing: [
-      'Mama Lou: One last job, and we eat good. A white sports car, mall lot, no owner in sight.',
-      "Mama Lou: Bring it to my garage. That's a thousand in your pocket, Rico.",
+      'Mama Lou: Last one, and it pays. A white sports car is sitting in the mall lot, keys and all.',
+      'Mama Lou: Bring it to my garage. Then we are square, and Vice Shores is yours.',
     ],
-    objective: (w) => (w.missionStep === 0
-      ? 'Steal the white sports car from the mall lot'
-      : 'Bring the sports car to Mama Lou\'s garage'),
+    steps: [
+      { text: 'Steal the white sports car from the mall lot', at: { x: 2200, y: 1400 }, needCar: 'sports', radius: 60 },
+      { text: 'Bring the sports car to Mama Lou\'s garage', at: { x: 1000, y: 1400 }, radius: 70 },
+    ],
   },
 ];
 
-export const SPOTS = {
-  taxi: { x: 1400, y: 2000 },
-  club: { x: 600, y: 1000 },
-  package: { x: 2600, y: 200 },
-  hotel: { x: 1800, y: 1800 },
-  safehouse: { x: 1400, y: 600 },
-  mallLot: { x: 2200, y: 1400 },
-  garage: { x: 1000, y: 1400 },
-};
-
+// The mission the player is on now, or null once all four are done.
 export function currentMission(world) {
   return world.missionIndex < MISSIONS.length ? MISSIONS[world.missionIndex] : null;
 }
 
-export function missionObjective(world) {
-  const mission = currentMission(world);
-  if (!mission) return 'Free roam — Vice Shores is yours, Rico';
-  return mission.objective(world);
+// Short title for the HUD: mission name, or Free Roam.
+export function missionTitle(world) {
+  const m = currentMission(world);
+  return m ? m.name : 'Free Roam';
 }
 
+// The objective line for the HUD.
+export function currentObjective(world) {
+  const m = currentMission(world);
+  if (!m) return 'Vice Shores is yours — drive and explore.';
+  return m.steps[world.missionStep].text;
+}
+
+// Where the pulsing marker sits in the world, or null.
 export function missionMarker(world) {
-  const i = world.missionIndex;
-  const s = world.missionStep;
-  if (i === 0) return s === 0 ? SPOTS.taxi : SPOTS.club;
-  if (i === 1) return s === 0 ? SPOTS.package : SPOTS.hotel;
-  if (i === 2) return s === 0 ? null : SPOTS.safehouse;
-  if (i === 3) return s === 0 ? SPOTS.mallLot : SPOTS.garage;
-  return null;
+  const m = currentMission(world);
+  if (!m) return null;
+  const step = m.steps[world.missionStep];
+  if (!step || !step.at) return null;
+  return { x: step.at.x, y: step.at.y };
 }
 
-function setDialogue(world, lines) {
-  world.dialogue = { lines, index: 0, timer: 7 };
-}
-
+// Start a mission: briefing dialogue, step zero, heat for the getaway.
 export function startMission(world, index) {
+  const m = MISSIONS[index];
+  if (!m) return;
   world.missionIndex = index;
   world.missionStep = 0;
   world.missionTimer = 0;
   world.missionFailed = false;
-  const mission = MISSIONS[index];
-  if (!mission) {
-    world.marker = null;
-    setDialogue(world, ['Mama Lou: That\'s all four jobs, Rico. The city is yours now. Free roam.']);
-    return;
-  }
-  setDialogue(world, mission.briefing);
   if (index === 2) {
-    // The getaway starts hot: two stars on the board from the first second.
-    world.wanted = 2;
-    world.quietTimer = 0;
+    world.wanted = 2; // the getaway job starts hot
+    world.crimeTimer = 0;
   }
-  world.marker = missionMarker(world);
+  say(world, m.briefing[0]);
+  world.events.missionStart = true;
 }
 
-function completeMission(world) {
-  const mission = MISSIONS[world.missionIndex];
-  world.player.cash += mission.reward;
-  world.jobsDone += 1;
-  world.saveDue = true;
-  world.events.cash = true;
-  world.events.mission = true;
-  const next = world.missionIndex + 1;
-  setDialogue(world, [`Mama Lou: Job done, Rico. $${mission.reward} in your pocket.`]);
-  if (next >= MISSIONS.length) {
-    world.missionIndex = next;
-    world.missionStep = 0;
-    world.marker = null;
-    setDialogue(world, [
-      `Mama Lou: Job done, Rico. $${mission.reward} in your pocket.`,
-      "Mama Lou: That's all four jobs. The city is yours now — free roam.",
-    ]);
+// One tick of the mission state machine.
+export function updateMissions(world, dt) {
+  const m = currentMission(world);
+  if (!m) return;
+  const step = m.steps[world.missionStep];
+  const player = world.player;
+
+  if (world.missionFailed) return; // waiting for ENTER to retry
+
+  if (step.loseHeat) {
+    if (world.wanted === 0) {
+      advanceStep(world, m);
+    }
     return;
   }
-  startMission(world, next);
-}
 
-export function updateMission(world, dt) {
-  const mission = currentMission(world);
-  if (!mission) return;
-  const p = world.player;
-  if (world.missionFailed) return;
-  const i = world.missionIndex;
-  const s = world.missionStep;
-
-  if (i === 0) {
-    if (s === 0 && p.car === world.taxi) {
-      world.missionStep = 1;
-      world.marker = missionMarker(world);
-      setDialogue(world, ['Mama Lou: Good. Now the Neon Mile club — north side, follow the marker.']);
-    } else if (s === 1 && p.car === world.taxi && dist(p.x, p.y, SPOTS.club.x, SPOTS.club.y) < 100) {
-      completeMission(world);
-    }
-  } else if (i === 1) {
-    if (s === 0 && dist(p.x, p.y, SPOTS.package.x, SPOTS.package.y) < 70) {
-      world.missionStep = 1;
-      world.missionTimer = MISSION_TIMER;
-      world.marker = missionMarker(world);
-      world.events.pickup = true;
-      setDialogue(world, ['Mama Lou: Package secured. Seventy-five seconds — GO!']);
-    } else if (s === 1) {
-      world.missionTimer -= dt;
-      if (dist(p.x, p.y, SPOTS.hotel.x, SPOTS.hotel.y) < 100) {
-        completeMission(world);
-      } else if (world.missionTimer <= 0) {
-        world.missionFailed = true;
-        setDialogue(world, ['Mama Lou: Too slow, Rico. The buyer walked. Press ENTER to run it again.']);
-      }
-    }
-  } else if (i === 2) {
-    if (s === 0 && world.wanted === 0) {
-      world.missionStep = 1;
-      world.marker = missionMarker(world);
-      setDialogue(world, ['Mama Lou: Clean. Now the safehouse in Old Town — lay low there.']);
-    } else if (s === 1 && dist(p.x, p.y, SPOTS.safehouse.x, SPOTS.safehouse.y) < 90) {
-      completeMission(world);
-    }
-  } else if (i === 3) {
-    if (s === 0 && p.car === world.sportsCar) {
-      world.missionStep = 1;
-      world.marker = missionMarker(world);
-      setDialogue(world, ['Mama Lou: She\'s yours. Bring her to my garage — easy does it.']);
-    } else if (s === 1 && p.car === world.sportsCar && dist(p.x, p.y, SPOTS.garage.x, SPOTS.garage.y) < 100) {
-      completeMission(world);
+  // Timed delivery: the clock runs from the pickup step on.
+  if (step.timed) {
+    world.missionTimer += dt;
+    if (world.missionTimer > step.timed) {
+      world.missionFailed = true;
+      say(world, "Mama Lou: Too slow, Rico. The client walked. Press ENTER and we try it again.");
+      world.events.missionFailed = true;
+      return;
     }
   }
 
-  // Cycle Mama Lou's briefing lines while one is showing.
-  if (world.dialogue && world.dialogue.lines.length > 1) {
-    world.dialogue.timer -= dt;
-    if (world.dialogue.timer <= 0) {
-      world.dialogue.index = (world.dialogue.index + 1) % world.dialogue.lines.length;
-      world.dialogue.timer = 7;
+  const at = step.at;
+  if (!at) return;
+  const here = player.inCar || player;
+  const d = dist(here.x, here.y, at.x, at.y);
+  if (d > (step.radius || 70)) return;
+
+  if (step.needCar) {
+    // The step completes only while driving the right car.
+    if (player.inCar && player.inCar.kind === step.needCar) {
+      if (world.missionStep === 0 && step.needCar === 'taxi') say(world, "Mama Lou: Good. Now the club, nice and easy.");
+      advanceStep(world, m);
     }
+    return;
+  }
+  advanceStep(world, m);
+}
+
+// Move to the next step, or pay out and start the next job.
+function advanceStep(world, m) {
+  world.missionStep++;
+  if (world.missionStep < m.steps.length) {
+    const next = m.steps[world.missionStep];
+    if (next.timed) {
+      world.missionTimer = 0;
+      say(world, 'Mama Lou: Clock is running. 75 seconds, Rico. Move!');
+    } else if (world.missionIndex === 1) {
+      say(world, 'Mama Lou: Package secured. Now the hotel — quick, quick.');
+    } else if (world.missionIndex === 2) {
+      say(world, 'Mama Lou: Clean. Now the safehouse, before they find you again.');
+    } else if (world.missionIndex === 3) {
+      say(world, "Mama Lou: That's my car. Bring her home to the garage.");
+    }
+    world.events.stepDone = true;
+    return;
+  }
+  // Job done: pay the player.
+  world.player.cash += m.reward;
+  world.jobsDone++;
+  world.events.cash = m.reward;
+  say(world, `Mama Lou: $${m.reward} in your pocket. ${world.missionIndex + 1 < MISSIONS.length ? 'Next job when you are ready.' : 'Vice Shores is yours now, Rico.'}`);
+  world.missionIndex++;
+  world.missionStep = 0;
+  world.missionTimer = 0;
+  if (world.missionIndex < MISSIONS.length) {
+    startMission(world, world.missionIndex);
   }
 }
 
-export { addWanted };
+// Retry the failed timed delivery from its pickup step.
+export function retryMission(world) {
+  const m = currentMission(world);
+  if (!m || !world.missionFailed) return;
+  world.missionFailed = false;
+  world.missionTimer = 0;
+  world.missionStep = 0;
+  say(world, "Mama Lou: Alright, fresh start. Package is at the docks again.");
+}
+
+// Put a line in the dialogue box for a few seconds. If a line is already
+// showing, queue behind it so a payout message is not lost to a briefing.
+export function say(world, text) {
+  if (!world.dialogue) {
+    world.dialogue = { text, until: world.time + 6 };
+  } else {
+    world.dialogueQueue.push(text);
+  }
+}
