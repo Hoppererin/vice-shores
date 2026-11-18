@@ -3,10 +3,11 @@
 // modules, no library and no network request), and the program hands it in. It copies game/ and
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game itself is Vice Shores, an original
-// top-down 2D open-world crime game: Rico Vega drives, steals cars, dodges the Vice Shores PD
-// and runs four jobs for the fixer Mama Lou across a living coastal city — traffic, pedestrians,
-// a wanted level, missions, a HUD with minimap, synthesized sound and a save. Screenshots live
-// in screenshots/ (the first by name is the cover).
+// top-down open-world crime game: Rico Vega drives, steals cars, dodges the Vice Shores PD and
+// runs four jobs for Mama Lou across a 3200x2400 coastal city, with a wanted system, traffic,
+// pedestrians, a beach, a park and a plaza, synthesized WebAudio sound and four deterministic
+// ?shot= screenshot scenes. Put your 3 or 4 PNG or JPEG screenshots in screenshots/ (the first
+// by name is the cover) and run it.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
