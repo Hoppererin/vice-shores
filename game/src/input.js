@@ -1,10 +1,17 @@
-// Keyboard + pointer input. In the browser it listens for keys and turns
-// them into a plain state object the world steps from; in Node (smoke
-// tests) the same shape is built by hand, so world.js never touches the DOM.
+// Keyboard + pointer input, rewritten for v5.1. In the browser it listens
+// for keys and turns them into a plain state object the world steps from;
+// in Node (smoke tests) the same shape is built by hand, so world.js
+// never touches the DOM.
 //
-// Held keys: up/down/left/right/run. One-shot actions, true for exactly the
-// step they were pressed in: enter (E), punch (F), pause (P), confirm
-// (Enter). The main loop clears the one-shots after each fixed step.
+// Held keys: up/down/left/right/run. One-shot actions, true for exactly
+// the step they were pressed in: enter (E), punch (F), pause (P or Esc),
+// confirm (Enter), crew (C), districts (V), jobs (B), hack (H),
+// fixer (G), recruit1-4 (1-4). The main loop clears the one-shots after
+// each fixed step, so a held key cannot fire twice.
+//
+// v5.1 adds G (Sal the Fixer's launder) and B (the district job board),
+// and a fourth recruit key: the crew is four people now. Escape also
+// pauses, because P alone is easy to miss mid-chase.
 
 const KEYMAP = {
   KeyW: 'up', ArrowUp: 'up',
@@ -15,13 +22,32 @@ const KEYMAP = {
   KeyE: 'enter',
   KeyF: 'punch',
   KeyP: 'pause',
+  Escape: 'pause',
   Enter: 'confirm',
+  // v5: crew menu (C), hacker jam (H), district panel (V), hire by number.
+  // v5.1: fixer launder (G), job board (B), a fourth recruit key.
+  KeyC: 'crew',
+  KeyH: 'hack',
+  KeyV: 'districts',
+  KeyB: 'jobs',
+  KeyG: 'fixer',
+  Digit1: 'recruit1',
+  Digit2: 'recruit2',
+  Digit3: 'recruit3',
+  Digit4: 'recruit4',
 };
+
+const ONE_SHOTS = new Set([
+  'enter', 'punch', 'pause', 'confirm', 'crew', 'hack', 'districts',
+  'jobs', 'fixer', 'recruit1', 'recruit2', 'recruit3', 'recruit4',
+]);
 
 export function createInput() {
   const input = {
     up: false, down: false, left: false, right: false, run: false,
     enter: false, punch: false, pause: false, confirm: false,
+    crew: false, hack: false, districts: false, jobs: false, fixer: false,
+    recruit1: false, recruit2: false, recruit3: false, recruit4: false,
     // Pointer position in canvas pixels, for the title-screen click.
     pointerX: 0, pointerY: 0, pointerDown: false,
     attached: false,
@@ -33,7 +59,9 @@ export function createInput() {
       const name = KEYMAP[e.code];
       if (!name) return;
       if (['up', 'down', 'left', 'right'].includes(name)) e.preventDefault();
-      if (name === 'enter' || name === 'punch' || name === 'pause' || name === 'confirm') {
+      // Repeat keydowns are ignored for one-shots: holding ENTER would
+      // otherwise skip straight through the busted screen.
+      if (ONE_SHOTS.has(name)) {
         if (!e.repeat) input[name] = true;
       } else {
         input[name] = true;
@@ -42,12 +70,20 @@ export function createInput() {
     };
     const up = (e) => {
       const name = KEYMAP[e.code];
-      if (!name) return;
-      if (name === 'enter' || name === 'punch' || name === 'pause' || name === 'confirm') return;
+      if (!name || ONE_SHOTS.has(name)) return;
       input[name] = false;
+    };
+    const pointer = (e) => {
+      input.pointerDown = true;
+      if (e && typeof e.clientX === 'number') {
+        input.pointerX = e.clientX;
+        input.pointerY = e.clientY;
+      }
+      unlockAudioOnce();
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
+    window.addEventListener('pointerdown', pointer);
     window.addEventListener('blur', () => {
       input.up = input.down = input.left = input.right = input.run = false;
     });
@@ -62,6 +98,15 @@ export function clearPressed(input) {
   input.punch = false;
   input.pause = false;
   input.confirm = false;
+  input.crew = false;
+  input.hack = false;
+  input.districts = false;
+  input.jobs = false;
+  input.fixer = false;
+  input.recruit1 = false;
+  input.recruit2 = false;
+  input.recruit3 = false;
+  input.recruit4 = false;
   input.pointerDown = false;
 }
 
@@ -70,6 +115,8 @@ export function blankInput() {
   return {
     up: false, down: false, left: false, right: false, run: false,
     enter: false, punch: false, pause: false, confirm: false,
+    crew: false, hack: false, districts: false, jobs: false, fixer: false,
+    recruit1: false, recruit2: false, recruit3: false, recruit4: false,
     pointerX: 0, pointerY: 0, pointerDown: false,
   };
 }

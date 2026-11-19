@@ -1,6 +1,20 @@
-// Everything that moves in Vice Shores: the player, pedestrians, traffic
-// cars and police cars. Each entity is a plain object; each step function
-// advances it by dt seconds using only the world and the seeded RNG.
+// Everything that moves in Vice Shores, rewritten for v5.1: the player,
+// pedestrians, traffic cars and police cars. Each entity is a plain
+// object; each step function advances it by dt seconds using only the
+// world and the seeded RNG.
+//
+// v5.1 changes:
+// - Pedestrians keep to the sidewalks while the heat is on. In v5 they
+//   wandered onto the asphalt mid-chase and got run over, which raised
+//   the wanted level for no good reason — the chase shot itself caught a
+//   fourth star that way. Now, at 3+ stars, a pedestrian on the road
+//   heads for the nearest sidewalk instead of ambling across.
+// - Traffic yields to roadblocks: a traffic car that sees a barrier bar
+//   ahead of it on its lane stops and waits instead of driving into it.
+// - Spike strips bite: a car crossing one at speed gets a tyre timer —
+//   top speed and steering are crippled until it wears off.
+// - Cars carry the PIT spin state (pitTimer) and the tyre state
+//   (tireTimer), both ticked down where the car is driven.
 
 import { CFG, CAR_MODELS } from './config.js';
 import { angleDiff, chance, clamp, dist, pick, rand, randInt } from './random.js';
@@ -29,6 +43,7 @@ let carSeq = 0;
 
 export function makeCar(kind, x, y, angle, model, rng) {
   const def = CAR_MODELS[model];
+  const baseTop = CFG.carTopSpeed * def.top;
   return {
     id: ++carSeq,
     kind, // 'traffic' | 'parked' | 'taxi' | 'sports' | 'police' | 'player'
@@ -37,12 +52,17 @@ export function makeCar(kind, x, y, angle, model, rng) {
     x, y, angle,
     speed: 0,
     len: def.len, wid: def.wid,
-    topSpeed: CFG.carTopSpeed * def.top,
+    topSpeed: baseTop,
+    baseTopSpeed: baseTop, // v5: the driver's +12% scales this, never the scaled value
+    block: false, // v5: true while a police car is holding a roadblock line
     driver: kind === 'traffic' || kind === 'taxi',
     node: -1, // current road-graph node (traffic only)
     next: -1, // node being driven to (traffic only)
     wait: 0,
     hitCooldown: 0,
+    pitCooldown: 0, // v5.1: seconds before this police car can PIT again
+    pitTimer: 0, // v5.1: >0 while this car is spinning out from a PIT
+    tireTimer: 0, // v5.1: >0 while the tyres are popped from a spike strip
   };
 }
 
@@ -138,7 +158,9 @@ export function spawnPeds(world) {
 
 // ---------------------------------------------------------------- traffic
 
-// Drive one traffic car along the road graph for dt seconds.
+// Drive one traffic car along the road graph for dt seconds. A traffic
+// car that sees a roadblock barrier ahead on its lane stops and waits
+// instead of driving into the cordon — the PD's line is not a suggestion.
 export function stepTrafficCar(world, car, dt) {
   if (car.wait > 0) { car.wait -= dt; return; }
   const city = world.city;
@@ -160,6 +182,17 @@ export function stepTrafficCar(world, car, dt) {
     const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
     if (ahead > 0 && ahead < 78 && side < 30) { blocked = true; break; }
   }
+  // And for a barrier roadblock ahead: the cars respect the cordon.
+  if (!blocked) {
+    for (const rb of world.roadblocks) {
+      if (rb.kind !== 'barrier') continue;
+      const ox = rb.x - car.x;
+      const oy = rb.y - car.y;
+      const ahead = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
+      const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
+      if (ahead > 0 && ahead < 110 && side < 60) { blocked = true; break; }
+    }
+  }
   const goal = blocked ? 0 : CFG.trafficSpeed;
   car.speed += clamp(goal - car.speed, -260 * dt, 200 * dt);
 
@@ -179,6 +212,10 @@ export function stepTrafficCar(world, car, dt) {
 // ---------------------------------------------------------------- peds
 
 // Walk one pedestrian: amble between sidewalk points, flee a fast car.
+// v5.1: while the wanted level is 3 or higher, a pedestrian who finds
+// themself on the asphalt heads for the nearest sidewalk instead of
+// ambling across the road — a chase down a road should not turn into a
+// wanted-level farm, and the chase screenshot stays clean.
 export function stepPed(world, ped, dt) {
   if (ped.downTimer > 0) {
     ped.downTimer -= dt;
@@ -198,10 +235,22 @@ export function stepPed(world, ped, dt) {
       ped.x += Math.cos(ped.angle) * ped.speed * dt;
       ped.y += Math.sin(ped.angle) * ped.speed * dt;
       ped.walkPhase += dt * 14;
+      // Fleeing stays on the sidewalk when the heat is on: steer the
+      // flight toward the kerb instead of across the road.
+      if (world.wanted >= 3 && onRoad(ped.x, ped.y)) {
+        ped.target = nearestSidewalkExit(ped.x, ped.y);
+      }
       return;
     }
   }
   ped.fleeing = false;
+  // High heat: a pedestrian standing on the road walks to the nearest
+  // sidewalk — straight off the road edge, not to a random distant point
+  // (which could be hundreds of pixels down the same road, leaving them
+  // on the asphalt for seconds while a chase runs through).
+  if (world.wanted >= 3 && onRoad(ped.x, ped.y)) {
+    ped.target = nearestSidewalkExit(ped.x, ped.y);
+  }
   if (!ped.target || dist(ped.x, ped.y, ped.target.x, ped.target.y) < 18) {
     ped.target = randomSidewalkPoint(world.rng, world.city);
   }
@@ -215,12 +264,42 @@ export function stepPed(world, ped, dt) {
   ped.walkPhase += dt * 9;
 }
 
+// The nearest point off the road from (x, y): just beyond the asphalt
+// edge of the closest road line, on the nearer side. A pedestrian on the
+// road at high wanted heads here — the fastest way off the asphalt.
+function nearestSidewalkExit(x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const rx of CFG.roadXs) {
+    const d = Math.abs(x - rx);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: rx + (x >= rx ? CFG.roadHalf + 13 : -(CFG.roadHalf + 13)), y };
+    }
+  }
+  for (const ry of CFG.roadYs) {
+    const d = Math.abs(y - ry);
+    if (d < bestD) {
+      bestD = d;
+      best = { x, y: ry + (y >= ry ? CFG.roadHalf + 13 : -(CFG.roadHalf + 13)) };
+    }
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------- driving
 
 // Advance a driven car (the player's) by dt. Returns 'crash' when it hit a
-// building hard, 'bump' for a light scrape, '' otherwise.
+// building hard, 'bump' for a light scrape, '' otherwise. With Mara the
+// Driver on the crew, the car runs faster and turns sharper (v5). With
+// popped tyres from a spike strip (v5.1), the top speed is crippled and
+// the steering goes soft until the timer wears off.
 export function stepDrivenCar(world, car, input, dt) {
-  const top = car.topSpeed;
+  if (car.tireTimer > 0) car.tireTimer -= dt;
+  const driver = world.crew && world.crew.driver;
+  const tyres = car.tireTimer > 0 ? 0.55 : 1;
+  const top = car.baseTopSpeed * (driver ? CFG.driverTopBonus : 1) * tyres;
+  car.topSpeed = top;
   if (input.up) car.speed += CFG.carAccel * dt;
   else if (input.down) {
     if (car.speed > 20) car.speed -= CFG.carBrake * dt;
@@ -233,7 +312,8 @@ export function stepDrivenCar(world, car, input, dt) {
 
   const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
   const speedFactor = clamp(Math.abs(car.speed) / 240, 0, 1);
-  car.angle += steer * CFG.carTurn * speedFactor * Math.sign(car.speed || 1) * dt;
+  const turn = CFG.carTurn * (driver ? CFG.driverTurnBonus : 1) * (car.tireTimer > 0 ? 0.8 : 1);
+  car.angle += steer * turn * speedFactor * Math.sign(car.speed || 1) * dt;
 
   car.x += Math.cos(car.angle) * car.speed * dt;
   car.y += Math.sin(car.angle) * car.speed * dt;

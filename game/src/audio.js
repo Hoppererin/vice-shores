@@ -3,11 +3,19 @@
 // punches and crashes, and a quiet bassline loop. Everything is guarded, so
 // the game runs fine with no audio device and no user gesture yet — audio
 // only starts after the first key press (see unlock()).
+//
+// v5.1 adds four sounds: the PIT spin (a low grinding whine), the spike
+// strip (a sharp metallic pop), the fixer's launder (a soft two-note
+// chime) and the job board (a paper-ish click as a side job pins up).
 
 export function createAudio() {
   const stub = {
     unlock() {}, setEngine() {}, siren() {},
     pickup() {}, cash() {}, punch() {}, crash() {}, jingle() {}, mission() {},
+    // v5: dispatch radio blip, hacker jam warble, crew hire chime.
+    dispatch() {}, hack() {}, recruit() {},
+    // v5.1: PIT spin, spike strip, fixer launder, job board pin.
+    pit() {}, spike() {}, launder() {}, sidejob() {},
   };
   if (typeof window === 'undefined' || typeof window.AudioContext === 'undefined') {
     return stub; // Node / no audio: silent no-ops.
@@ -129,5 +137,30 @@ export function createAudio() {
       blip(523, 0.14, 'triangle', 0.1, 0.12);
       blip(659, 0.24, 'triangle', 0.1, 0.24);
     },
+    // Dispatch radio: two short squelch blips.
+    dispatch() { blip(1200, 0.06, 'square', 0.05); blip(900, 0.08, 'square', 0.05, 0.08); },
+    // Hacker jam: a quick descending warble.
+    hack() {
+      blip(1400, 0.1, 'sawtooth', 0.07, 0, 500);
+      blip(1100, 0.1, 'sawtooth', 0.07, 0.1, 400);
+      blip(800, 0.16, 'sawtooth', 0.07, 0.2, 300);
+    },
+    // Hiring a crew member: a warm little major chime.
+    recruit() {
+      blip(523, 0.12, 'triangle', 0.1);
+      blip(659, 0.12, 'triangle', 0.1, 0.1);
+      blip(784, 0.2, 'triangle', 0.1, 0.2);
+    },
+    // v5.1: the PIT spin — a low grinding whine as the car is spun out.
+    pit() { blip(180, 0.35, 'sawtooth', 0.18, 0, 60); },
+    // v5.1: the spike strip — a sharp metallic pop as the tyres blow.
+    spike() { blip(1600, 0.1, 'square', 0.14, 0, 400); },
+    // v5.1: the fixer's launder — a soft two-note chime, heat washing off.
+    launder() {
+      blip(523, 0.18, 'sine', 0.1);
+      blip(1046, 0.24, 'sine', 0.1, 0.16);
+    },
+    // v5.1: the job board — a paper-ish click as the side job pins up.
+    sidejob() { blip(700, 0.08, 'triangle', 0.1, 0, 900); },
   };
 }

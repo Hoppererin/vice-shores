@@ -1,9 +1,15 @@
-// The city of Vice Shores: a fixed road grid, blocks of pastel buildings,
-// a beach and ocean on the east edge, a park with a pond, a plaza with a
-// fountain, and the road graph the traffic drives on. Everything is built
-// from the world's seeded RNG, so a seed always builds the same city.
+// The city of Vice Shores, rewritten for v5.1: a fixed road grid, blocks
+// of pastel buildings, a beach and ocean on the east edge, a park with a
+// pond, a plaza with a fountain, and the road graph the traffic drives
+// on. Everything is built from the world's seeded RNG, so a seed always
+// builds the same city.
+//
+// v5.1 adds the notice boards: one sign per district, standing on the
+// sidewalk, where the job board lives in the world. The board is drawn
+// by render.js; pressing B anywhere opens the current district's board,
+// and the boards give the player a place to look for work.
 
-import { CFG } from './config.js';
+import { CFG, NOTICE_BOARDS } from './config.js';
 import { chance, clamp, mulberry32, pick, rand, randInt } from './random.js';
 
 // Build the whole city for a seed (or a ready rng stream). Returns the city
@@ -18,6 +24,7 @@ export function buildCity(seed) {
     nodes: [],
     edges: [],
     blocks: 0,
+    boards: NOTICE_BOARDS.map((b) => ({ ...b })),
   };
 
   buildRoadGraph(city);
@@ -217,6 +224,13 @@ export function districtAt(x, y) {
   return 'Vice Shores';
 }
 
+// The notice board of a district, or null. The job board panel opens for
+// the district the player is standing in; the board in the world is the
+// sign that marks the spot.
+export function noticeBoardAt(city, district) {
+  return city.boards.find((b) => b.district === district) || null;
+}
+
 // Nearest road-graph node to a point.
 export function nearestNode(city, x, y) {
   let best = city.nodes[0];
@@ -226,4 +240,22 @@ export function nearestNode(city, x, y) {
     if (d < bestD) { bestD = d; best = n; }
   }
   return best;
+}
+
+// The nearest road line to a point: the road's centre and its direction
+// (0 for an east-west road, PI/2 for a north-south one), plus how far the
+// point is from the line. Dispatch uses this to drop roadblocks on the
+// road the player is travelling, not in a block or a yard.
+export function nearestRoad(x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const rx of CFG.roadXs) {
+    const d = Math.abs(x - rx);
+    if (d < bestD) { bestD = d; best = { x: rx, y: clamp(y, 120, CFG.worldH - 120), angle: Math.PI / 2 }; }
+  }
+  for (const ry of CFG.roadYs) {
+    const d = Math.abs(y - ry);
+    if (d < bestD) { bestD = d; best = { x: clamp(x, 120, CFG.sandX - 120), y: ry, angle: 0 }; }
+  }
+  return { ...best, dist: bestD };
 }

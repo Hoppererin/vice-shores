@@ -1,10 +1,22 @@
-// Mama Lou's four jobs. Each mission is a small state machine: a briefing
-// (shown as dialogue), a chain of steps with a world position to reach, and
-// a cash reward. Completing a job advances the story; failing the timed
-// delivery lets the player retry the same job with ENTER.
+// Mama Lou's eight jobs, rewritten for v5.1. Each mission is a small
+// state machine: a briefing (shown as dialogue), a chain of steps with a
+// world position to reach, and a cash reward. Completing a job advances
+// the story; failing the timed delivery lets the player retry the same
+// job with ENTER.
+//
+// v5.1 changes: The Silent Partner's delivery is loosened from 60 to 75
+// seconds, and a checkpoint halfway along the route adds 15 seconds —
+// the roadblock was making it brutally tight. Two new jobs close the
+// story: The Clean Getaway (job 7), which starts hot and is the fixer's
+// moment to shine, and The Vice Shores Job (job 8), a five-stop finale
+// across the whole city with a spike strip waiting on the route. After
+// the eighth job: free roam.
 
 import { CFG } from './config.js';
 import { dist } from './random.js';
+import { districtAt } from './city.js';
+import { changeStanding, payoutMultiplier } from './standing.js';
+import { clearScriptedRoadblocks } from './dispatch.js';
 
 export const MISSIONS = [
   {
@@ -55,9 +67,67 @@ export const MISSIONS = [
       { text: 'Bring the sports car to Mama Lou\'s garage', at: { x: 1000, y: 1400 }, radius: 70 },
     ],
   },
+  {
+    name: 'The Silent Partner',
+    reward: 700,
+    briefing: [
+      'Mama Lou: A quiet one, Rico. Pick up a package at the Neon Mile club, take it to the Marina docks.',
+      'Mama Lou: Word is the PD set a roadblock on the main drag. Got a hacker? Now is the time. If not — take the long way round.',
+    ],
+    steps: [
+      { text: 'Pick up the package at the Neon Mile club', at: { x: 600, y: 1000 }, radius: 60 },
+      {
+        text: 'Deliver the package to the Marina docks in 75 seconds',
+        at: { x: 2600, y: 200 }, radius: 70, timed: 75,
+        checkpoint: { x: 1800, y: 600, radius: 80, bonus: 15 },
+      },
+    ],
+  },
+  {
+    name: 'The Long Con',
+    reward: 1200,
+    briefing: [
+      'Mama Lou: The big one, Rico. Four stops, one night, no mistakes.',
+      'Mama Lou: Pick up Mara at the safehouse, hit the Old Town bank, then the Palm Court hotel, then bring it all home to my garage.',
+    ],
+    steps: [
+      { text: 'Pick up Mara at the safehouse in Old Town', at: { x: 1400, y: 600 }, radius: 70 },
+      { text: 'Hit the Old Town bank', at: { x: 600, y: 600 }, radius: 70 },
+      { text: 'Collect from the Palm Court hotel', at: { x: 1800, y: 1800 }, radius: 70 },
+      { text: 'Bring it all home to Mama Lou\'s garage', at: { x: 1000, y: 1400 }, radius: 70 },
+    ],
+  },
+  {
+    name: 'The Clean Getaway',
+    reward: 900,
+    briefing: [
+      'Mama Lou: Three stars, Rico, and a package that has to reach the beach. Lose the heat first.',
+      'Mama Lou: Got Sal the Fixer? Press G and watch two stars vanish. If not — drive like you mean it.',
+    ],
+    steps: [
+      { text: 'Lose the police (get your wanted level to zero)', at: null, loseHeat: true },
+      { text: 'Pick up the package at the Neon Mile club', at: { x: 600, y: 1000 }, radius: 60 },
+      { text: 'Deliver the package to Vice Beach in 90 seconds', at: { x: 2900, y: 1200 }, radius: 70, timed: 90 },
+    ],
+  },
+  {
+    name: 'The Vice Shores Job',
+    reward: 2000,
+    briefing: [
+      'Mama Lou: The last one, Rico. Five stops, one night, the whole city.',
+      'Mama Lou: Bank, casino, docks, hotel, then home. The PD knows something is happening — expect spike strips on the main drag. Bring the crew.',
+    ],
+    steps: [
+      { text: 'Hit the Old Town bank', at: { x: 600, y: 600 }, radius: 70 },
+      { text: 'Collect from the Neon Mile casino', at: { x: 600, y: 1400 }, radius: 70 },
+      { text: 'Pick up at the Marina docks', at: { x: 2600, y: 200 }, radius: 70 },
+      { text: 'Collect from the Palm Court hotel', at: { x: 1800, y: 1800 }, radius: 70 },
+      { text: 'Bring it all home to Mama Lou\'s garage', at: { x: 1000, y: 1400 }, radius: 70 },
+    ],
+  },
 ];
 
-// The mission the player is on now, or null once all four are done.
+// The mission the player is on now, or null once all eight are done.
 export function currentMission(world) {
   return world.missionIndex < MISSIONS.length ? MISSIONS[world.missionIndex] : null;
 }
@@ -75,16 +145,22 @@ export function currentObjective(world) {
   return m.steps[world.missionStep].text;
 }
 
-// Where the pulsing marker sits in the world, or null.
+// Where the pulsing marker sits in the world, or null. A timed step's
+// checkpoint shows as the marker until it is hit, then the delivery
+// point takes over.
 export function missionMarker(world) {
   const m = currentMission(world);
   if (!m) return null;
   const step = m.steps[world.missionStep];
   if (!step || !step.at) return null;
+  if (step.checkpoint && !world.checkpointHit) {
+    return { x: step.checkpoint.x, y: step.checkpoint.y };
+  }
   return { x: step.at.x, y: step.at.y };
 }
 
-// Start a mission: briefing dialogue, step zero, heat for the getaway.
+// Start a mission: briefing dialogue, step zero, heat for the getaway
+// jobs. The finale also scripts a spike strip on the main drag.
 export function startMission(world, index) {
   const m = MISSIONS[index];
   if (!m) return;
@@ -92,9 +168,28 @@ export function startMission(world, index) {
   world.missionStep = 0;
   world.missionTimer = 0;
   world.missionFailed = false;
+  world.checkpointHit = false;
+  world.jamUsedThisJob = false; // the hacker's jam refreshes each job
+  world.fixerUsedThisJob = false; // so does the fixer's launder
   if (index === 2) {
     world.wanted = 2; // the getaway job starts hot
     world.crimeTimer = 0;
+  }
+  if (index === 4) {
+    // The Silent Partner: the PD already has a roadblock on the direct
+    // route (the x=1400 road at the y=1000 crossing). world.js places it;
+    // the player jams it with the hacker or drives around it.
+    world.wantRoadblockAt = { x: 1400, y: 1000, angle: Math.PI / 2, kind: 'barrier' };
+  }
+  if (index === 6) {
+    world.wanted = 3; // The Clean Getaway starts hotter than the getaway
+    world.crimeTimer = 0;
+  }
+  if (index === 7) {
+    // The Vice Shores Job: a spike strip waits on the main drag (the
+    // x=1800 road at the y=1400 crossing), right on the casino-to-docks
+    // leg. world.js places it; slow down or go around.
+    world.wantRoadblockAt = { x: 1800, y: 1400, angle: 0, kind: 'spike' };
   }
   say(world, m.briefing[0]);
   world.events.missionStart = true;
@@ -116,9 +211,20 @@ export function updateMissions(world, dt) {
     return;
   }
 
-  // Timed delivery: the clock runs from the pickup step on.
+  // Timed delivery: the clock runs from the pickup step on. A checkpoint
+  // on the route adds its bonus once, then the marker moves to the drop.
   if (step.timed) {
     world.missionTimer += dt;
+    if (step.checkpoint && !world.checkpointHit) {
+      const here = player.inCar || player;
+      const cp = step.checkpoint;
+      if (dist(here.x, here.y, cp.x, cp.y) <= cp.radius) {
+        world.checkpointHit = true;
+        world.missionTimer = Math.max(0, world.missionTimer - cp.bonus);
+        say(world, `Mama Lou: Checkpoint — ${cp.bonus} seconds back on the clock. Keep moving.`);
+        world.events.stepDone = true;
+      }
+    }
     if (world.missionTimer > step.timed) {
       world.missionFailed = true;
       say(world, "Mama Lou: Too slow, Rico. The client walked. Press ENTER and we try it again.");
@@ -151,25 +257,52 @@ function advanceStep(world, m) {
     const next = m.steps[world.missionStep];
     if (next.timed) {
       world.missionTimer = 0;
-      say(world, 'Mama Lou: Clock is running. 75 seconds, Rico. Move!');
+      world.checkpointHit = false;
+      say(world, `Mama Lou: Clock is running. ${next.timed} seconds, Rico. Move!`);
     } else if (world.missionIndex === 1) {
       say(world, 'Mama Lou: Package secured. Now the hotel — quick, quick.');
     } else if (world.missionIndex === 2) {
       say(world, 'Mama Lou: Clean. Now the safehouse, before they find you again.');
     } else if (world.missionIndex === 3) {
       say(world, "Mama Lou: That's my car. Bring her home to the garage.");
+    } else if (world.missionIndex === 4) {
+      say(world, 'Mama Lou: Package secured. Docks, fast — and mind the roadblock.');
+    } else if (world.missionIndex === 5) {
+      const stops = ['Mama Lou: Mara is in. Now the bank — in and out.', 'Mama Lou: Bank done. The hotel is waiting.', 'Mama Lou: Last stop — bring it home to my garage.'];
+      say(world, stops[Math.min(world.missionStep - 1, stops.length - 1)]);
+    } else if (world.missionIndex === 6) {
+      if (world.missionStep === 1) say(world, 'Mama Lou: Clean. Package is at the club — beach, fast.');
+      else say(world, 'Mama Lou: Package secured. Ninety seconds to the beach. Go.');
+    } else if (world.missionIndex === 7) {
+      const stops = [
+        'Mama Lou: Bank done. The casino is waiting.',
+        'Mama Lou: Casino done. Docks next — mind the spike strips.',
+        'Mama Lou: Docks done. The hotel, then home.',
+        'Mama Lou: Last stop — bring it all home to my garage.',
+      ];
+      say(world, stops[Math.min(world.missionStep - 1, stops.length - 1)]);
     }
     world.events.stepDone = true;
     return;
   }
-  // Job done: pay the player.
-  world.player.cash += m.reward;
+  // Job done: pay the player. The payout scales with the district's
+  // standing where the job ends, and the district likes Rico a little
+  // more for a job well done.
+  const lastStep = m.steps[m.steps.length - 1];
+  const payDistrict = lastStep.at ? districtAt(lastStep.at.x, lastStep.at.y) : world.district;
+  const mult = payoutMultiplier(world, payDistrict);
+  const payout = Math.round(m.reward * mult);
+  world.player.cash += payout;
   world.jobsDone++;
-  world.events.cash = m.reward;
-  say(world, `Mama Lou: $${m.reward} in your pocket. ${world.missionIndex + 1 < MISSIONS.length ? 'Next job when you are ready.' : 'Vice Shores is yours now, Rico.'}`);
+  world.events.cash = payout;
+  if (world.standing) changeStanding(world, payDistrict, CFG.standingJobGain);
+  say(world, `Mama Lou: $${payout} in your pocket${mult > 1.01 ? ' — ' + payDistrict + ' pays a bonus for a friend' : ''}. ${world.missionIndex + 1 < MISSIONS.length ? 'Next job when you are ready.' : 'Vice Shores is yours now, Rico.'}`);
+  // The job is done, so its scripted roadblock stands down too.
+  clearScriptedRoadblocks(world);
   world.missionIndex++;
   world.missionStep = 0;
   world.missionTimer = 0;
+  world.checkpointHit = false;
   if (world.missionIndex < MISSIONS.length) {
     startMission(world, world.missionIndex);
   }
@@ -182,6 +315,15 @@ export function retryMission(world) {
   world.missionFailed = false;
   world.missionTimer = 0;
   world.missionStep = 0;
+  world.checkpointHit = false;
+  // A scripted roadblock is part of the job: if the failed attempt broke
+  // it or jammed it away, put it back for the retry.
+  if (world.missionIndex === 4 && !world.roadblocks.some((r) => r.scripted)) {
+    world.wantRoadblockAt = { x: 1400, y: 1000, angle: Math.PI / 2, kind: 'barrier' };
+  }
+  if (world.missionIndex === 7 && !world.roadblocks.some((r) => r.scripted)) {
+    world.wantRoadblockAt = { x: 1800, y: 1400, angle: 0, kind: 'spike' };
+  }
   say(world, "Mama Lou: Alright, fresh start. Package is at the docks again.");
 }
 

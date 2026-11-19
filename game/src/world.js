@@ -1,6 +1,18 @@
-// The world: one state object and one fixed-step function tying the city,
-// the player, the traffic, the police and the missions together. This module
+// The world, rewritten for v5.1: one state object and one fixed-step
+// function tying the city, the player, the traffic, the police, the
+// dispatch, the crew, the standing and the missions together. This module
 // never touches the DOM, so Node can import it for smoke tests.
+//
+// v5.1 changes:
+// - Sal the Fixer (G key) launders heat once per job; B opens the
+//   district job board; 4 recruits (keys 1-4).
+// - Side jobs from the job boards run alongside the story jobs.
+// - Flares burn over fresh roadblocks; spike strips bite fast cars.
+// - Pedestrians keep to the sidewalks when the heat is on (v5 let them
+//   wander into the road mid-chase and raise the wanted level).
+// - Standing drifts toward zero once a minute; the fixer and the hacker
+//   refresh their once-per-job abilities when a story job starts.
+// - A busted run clears roadblocks, the helicopter, flares and side jobs.
 
 import { CFG } from './config.js';
 import { mulberry32, clamp, dist } from './random.js';
@@ -11,8 +23,11 @@ import {
 } from './entities.js';
 import { addCrime, updateWanted, stepPoliceCar, stepFootCop, resetAfterArrest } from './police.js';
 import { currentMission, updateMissions, startMission, retryMission, say } from './missions.js';
+import { updateDispatch, spawnRoadblockAt, collideRoadblock } from './dispatch.js';
+import { recruitCrew, hackJam, fixerLaunder, stepCompanions, restoreCompanions, CREW_ROLES } from './crew.js';
+import { freshStanding, driftStanding, startSideJob, updateSideJob } from './standing.js';
 
-// Build a fresh world. opts: { cash, missionIndex, jobsDone } restores a save.
+// Build a fresh world. opts: { cash, missionIndex, jobsDone, crew, standing } restores a save.
 export function createWorld(seed = 7, opts = {}) {
   const rng = mulberry32(seed);
   const city = buildCity(rng);
@@ -22,6 +37,7 @@ export function createWorld(seed = 7, opts = {}) {
     city,
     time: 0,
     screen: 'title', // title | play | pause | busted | wasted
+    overlay: null, // null | 'crew' | 'districts' | 'jobs': a panel over a paused game
     player: makePlayer(1350, 2000),
     cars: [],
     peds: [],
@@ -29,16 +45,35 @@ export function createWorld(seed = 7, opts = {}) {
     footCops: [],
     wanted: 0,
     crimeTimer: 0,
+    spawnTimer: 0,
     missionIndex: opts.missionIndex || 0,
     missionStep: 0,
     missionTimer: 0,
     missionFailed: false,
+    checkpointHit: false,
     jobsDone: opts.jobsDone || 0,
     dialogue: null,
     dialogueQueue: [],
     camera: { x: 1350, y: 2000 },
     district: 'Neon Mile',
     saveTimer: 0,
+    driftTimer: 0,
+    // v5/v5.1: dispatch (roadblocks + helicopter), crew, district standing.
+    roadblocks: [],
+    flares: [],
+    heli: null,
+    heliLocked: false, // a scripted scene (chase shot) keeps Air-1 in frame
+    dispatch: { msg: null, until: 0, cooldown: 0 },
+    dispatchLog: [],
+    crew: { driver: false, hacker: false, lookout: false, fixer: false, ...(opts.crew || {}) },
+    companions: [],
+    jamUntil: 0,
+    jamUsedThisJob: false,
+    fixerUsedThisJob: false,
+    wantRoadblockAt: null,
+    standing: { ...freshStanding(), ...(opts.standing || {}) },
+    standingFlash: null,
+    sideJob: null,
     events: freshEvents(),
   };
   world.player.cash = opts.cash || 0;
@@ -49,6 +84,7 @@ export function createWorld(seed = 7, opts = {}) {
   world.cars.push(makeSportsCar(2200, 1400, rng));
   world.peds = spawnPeds(world);
   world.district = districtAt(world.player.x, world.player.y);
+  if (opts.crew) restoreCompanions(world);
   return world;
 }
 
@@ -57,6 +93,8 @@ function freshEvents() {
     crime: false, cash: 0, stepDone: false, missionStart: false,
     missionFailed: false, wantedDown: false, rammed: false, busted: false,
     punch: false, crash: false, pickup: false, enteredCar: false,
+    roadblock: false, roadblockBreak: false, hack: false, recruit: false,
+    pit: false, spike: false, launder: false, sidejob: false,
   };
 }
 
@@ -70,10 +108,50 @@ export function stepWorld(world, input, dt) {
     if (car.kind === 'traffic') stepTrafficCar(world, car, dt);
   }
   for (const ped of world.peds) stepPed(world, ped, dt);
+  stepCompanions(world, dt);
 
   if (world.screen !== 'play') {
     updateCamera(world);
     return;
+  }
+
+  // A crew, district or job-board panel pauses the action (the city
+  // keeps living behind it, same as the pause screen).
+  if (world.overlay) {
+    if (input.crew) { input.crew = false; world.overlay = null; }
+    if (input.districts) { input.districts = false; world.overlay = null; }
+    if (input.jobs) { input.jobs = false; world.overlay = null; }
+    if (input.pause) { input.pause = false; world.overlay = null; }
+    if (world.overlay === 'crew') {
+      if (input.recruit1) { input.recruit1 = false; recruitCrew(world, CREW_ROLES[0].id); }
+      if (input.recruit2) { input.recruit2 = false; recruitCrew(world, CREW_ROLES[1].id); }
+      if (input.recruit3) { input.recruit3 = false; recruitCrew(world, CREW_ROLES[2].id); }
+      if (input.recruit4) { input.recruit4 = false; recruitCrew(world, CREW_ROLES[3].id); }
+    }
+    if (world.overlay === 'jobs') {
+      if (input.recruit1) { input.recruit1 = false; takeBoardJob(world, 0); }
+      if (input.recruit2) { input.recruit2 = false; takeBoardJob(world, 1); }
+    }
+    updateCamera(world);
+    return;
+  }
+
+  // v5/v5.1 one-shot keys: C opens the crew menu, V the district panel,
+  // B the job board for this district, H fires the hacker's dispatch jam,
+  // G spends the fixer's once-per-job launder.
+  if (input.crew) { input.crew = false; world.overlay = 'crew'; updateCamera(world); return; }
+  if (input.districts) { input.districts = false; world.overlay = 'districts'; updateCamera(world); return; }
+  if (input.jobs) { input.jobs = false; world.overlay = 'jobs'; updateCamera(world); return; }
+  if (input.hack) { input.hack = false; hackJam(world); }
+  if (input.fixer) { input.fixer = false; fixerLaunder(world); }
+
+  // A mission asked for a scripted roadblock: place it now, on the
+  // direct route, before the player gets there. The job names its kind —
+  // a barrier for the Silent Partner, a spike strip for the finale.
+  if (world.wantRoadblockAt) {
+    const at = world.wantRoadblockAt;
+    world.wantRoadblockAt = null;
+    spawnRoadblockAt(world, at.x, at.y, at.angle, at.kind || 'barrier');
   }
 
   // --- player ------------------------------------------------------------
@@ -85,11 +163,24 @@ export function stepWorld(world, input, dt) {
     stepPlayerOnFoot(world, input, dt);
   }
 
+  // Roadblock barriers are solid: the player's car and the player on foot
+  // both get pushed out of the striped bar. Spike strips are flat — the
+  // bite is handled in stepRoadblock, not here.
+  if (world.roadblocks.length) {
+    const body = player.inCar || player;
+    if (collideRoadblock(world, body, player.inCar ? body.wid * 0.6 : CFG.playerRadius)) {
+      if (player.inCar) {
+        player.inCar.speed *= 0.6;
+        world.events.crash = true;
+      }
+    }
+  }
+
   // --- collisions between cars ------------------------------------------
   // Police cars are excluded: their contact with the player is the ram in
-  // stepPoliceCar (damage + slowdown on a cooldown). Letting the generic
-  // bumper drag run on a chasing cop would grind both cars to a halt while
-  // it rides the player's bumper.
+  // stepPoliceCar (damage + slowdown on a cooldown), and the PIT in
+  // particular. Letting the generic bumper drag run on a chasing cop would
+  // grind both cars to a halt while it rides the player's bumper.
   const cars = world.cars;
   for (let i = 0; i < cars.length; i++) {
     if (cars[i].kind === 'police') continue;
@@ -100,6 +191,9 @@ export function stepWorld(world, input, dt) {
   }
 
   // --- the player car vs pedestrians ------------------------------------
+  // Only a fast car hurts: at 200 px/s a pedestrian on the road is a
+  // crime. v5.1 keeps pedestrians on the sidewalks while the heat is on,
+  // so a chase down a road does not turn into a wanted-level farm.
   if (player.inCar && Math.abs(player.inCar.speed) > 200) {
     for (const ped of world.peds) {
       if (ped.downTimer > 0) continue;
@@ -120,13 +214,20 @@ export function stepWorld(world, input, dt) {
     }
   }
 
-  // --- police and missions ----------------------------------------------
+  // --- police, dispatch, missions and side jobs -------------------------
   updateWanted(world, dt);
+  updateDispatch(world, dt);
   for (const car of world.police) stepPoliceCar(world, car, dt);
   for (const cop of world.footCops) stepFootCop(world, cop, dt);
   updateMissions(world, dt);
+  updateSideJob(world, dt);
 
-  // --- health, dialogue, camera ------------------------------------------
+  // --- standing drift, health, dialogue, camera ------------------------
+  world.driftTimer += dt;
+  if (world.driftTimer >= CFG.standingDriftSeconds) {
+    world.driftTimer = 0;
+    driftStanding(world);
+  }
   if (player.health <= 0) {
     player.health = 0;
     world.screen = 'wasted';
@@ -136,8 +237,30 @@ export function stepWorld(world, input, dt) {
       ? { text: world.dialogueQueue.shift(), until: world.time + 6 }
       : null;
   }
+  if (world.standingFlash && world.time > world.standingFlash.until) world.standingFlash = null;
   world.district = districtAt(player.x, player.y);
   updateCamera(world);
+}
+
+// Take a side job from the board of the district the player is in. A
+// story job takes priority, and one side job at a time.
+function takeBoardJob(world, index) {
+  if (currentMission(world)) {
+    say(world, 'Mama Lou: Finish my job first, Rico. Side work waits.');
+    return false;
+  }
+  if (world.sideJob) {
+    say(world, 'Mama Lou: One side job at a time. Finish it or drop it.');
+    return false;
+  }
+  const ok = startSideJob(world, world.district, index);
+  if (ok) {
+    const job = world.sideJob;
+    say(world, `Mama Lou: Side job — ${job.name}. Pick it up at the marker, then deliver. $${job.reward} if you are quick.`);
+  } else {
+    say(world, 'Mama Lou: That board is closed to you. This district does not know you well enough yet.');
+  }
+  return ok;
 }
 
 // On foot: WASD/arrows, Shift to run, E to enter a car, F to punch.
@@ -165,10 +288,23 @@ function stepPlayerOnFoot(world, input, dt) {
   if (input.punch) { input.punch = false; tryPunch(world); }
 }
 
-// Driving: the car answers to W/S and steering, E steps out.
+// Driving: the car answers to W/S and steering, E steps out. A PIT spin
+// locks the steering and bleeds the speed until the car straightens out.
 function stepPlayerCar(world, input, dt) {
   const player = world.player;
   const car = player.inCar;
+  if (car.pitTimer > 0) {
+    car.pitTimer -= dt;
+    car.angle += 6 * dt; // the car spins out
+    car.speed *= (1 - 1.4 * dt);
+    car.x += Math.cos(car.angle) * car.speed * dt;
+    car.y += Math.sin(car.angle) * car.speed * dt;
+    car.x = clamp(car.x, 30, CFG.worldW - 30);
+    car.y = clamp(car.y, 30, CFG.worldH - 30);
+    if (car.pitTimer <= 0) car.pitTimer = 0;
+    if (input.enter) { input.enter = false; }
+    return;
+  }
   const result = stepDrivenCar(world, car, input, dt);
   player.x = car.x;
   player.y = car.y;
@@ -255,18 +391,35 @@ function updateCamera(world) {
 }
 
 // Snapshot for the save file (localStorage), restored by createWorld opts.
+// v5/v5.1: the crew (all four) and the district standing travel with the
+// save. Side jobs are not saved — a side job is for one session.
 export function saveSnapshot(world) {
   return {
     cash: world.player.cash,
     missionIndex: world.missionIndex,
     jobsDone: world.jobsDone,
+    crew: { ...world.crew },
+    standing: { ...world.standing },
   };
 }
 
 // Busted / wasted retry: same as the police module's reset, re-exported
-// here so callers only import from world.js.
+// here so callers only import from world.js. A busted run also clears
+// the roadblocks, the helicopter, the flares and any side job — the PD
+// stands down and the board forgets the run.
 export function retryAfterArrest(world) {
   resetAfterArrest(world);
+  for (const rb of world.roadblocks) {
+    for (const car of rb.cars) {
+      const i = world.cars.indexOf(car);
+      if (i >= 0) world.cars.splice(i, 1);
+    }
+  }
+  world.roadblocks = [];
+  world.flares = [];
+  world.heli = null;
+  world.dispatch.msg = null;
+  world.sideJob = null;
 }
 
 // Retry the failed timed delivery.

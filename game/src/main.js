@@ -1,6 +1,11 @@
-// Vice Shores — boot, fixed-step loop, screens, save/load and the ?shot=
-// screenshot mode. The simulation itself lives in world.js; this file only
-// wires it to the canvas, the keyboard and localStorage.
+// Vice Shores v5.1 — boot, fixed-step loop, screens, save/load and the
+// ?shot= screenshot mode. The simulation itself lives in world.js; this
+// file only wires it to the canvas, the keyboard and localStorage.
+//
+// v5.1: eight story jobs in the status line and the title screen, sounds
+// for the PIT, the spike strip, the fixer's launder and the job board, and
+// the save round-trips the full four-person crew and the district
+// standing.
 
 import { CFG } from './config.js';
 import { createWorld, stepWorld, saveSnapshot, retryAfterArrest, retryFailedMission } from './world.js';
@@ -8,7 +13,7 @@ import { drawWorld } from './render.js';
 import { createInput, clearPressed, onFirstKey } from './input.js';
 import { createAudio } from './audio.js';
 import { applyShot } from './shots.js';
-import { startMission } from './missions.js';
+import { startMission, MISSIONS } from './missions.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -29,6 +34,9 @@ function loadSave() {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
+    // v5/v5.1 saves carry the crew (all four) and the district standing.
+    if (data.crew && typeof data.crew !== 'object') return null;
+    if (data.standing && typeof data.standing !== 'object') return null;
     return data;
   } catch {
     return null;
@@ -81,7 +89,7 @@ if (shot) {
     if (world.screen === 'title' && (input.confirm || input.pointerDown)) {
       world.screen = 'play';
       audio.unlock();
-      if (world.missionIndex < 4) startMission(world, world.missionIndex);
+      if (world.missionIndex < MISSIONS.length) startMission(world, world.missionIndex);
       consumed = true;
     } else if (world.screen === 'play' && input.pause) {
       world.screen = 'pause';
@@ -94,6 +102,10 @@ if (shot) {
       consumed = true;
     } else if (world.missionFailed && input.confirm && world.screen === 'play') {
       retryFailedMission(world);
+      consumed = true;
+    } else if (world.sideJob && world.sideJob.failed && input.confirm && world.screen === 'play') {
+      // A failed side job is dropped with ENTER; the board keeps its jobs.
+      world.sideJob = null;
       consumed = true;
     }
 
@@ -118,6 +130,13 @@ if (shot) {
     if (ev.cash) audio.cash();
     if (ev.missionStart || ev.stepDone) audio.mission();
     if (ev.missionFailed) audio.jingle();
+    if (ev.roadblock) audio.dispatch();
+    if (ev.hack) audio.hack();
+    if (ev.recruit) audio.recruit();
+    if (ev.pit) audio.pit();
+    if (ev.spike) audio.spike();
+    if (ev.launder) audio.launder();
+    if (ev.sidejob) audio.sidejob();
     world.events = freshEvents();
     const player = world.player;
     audio.setEngine(player.inCar ? Math.abs(player.inCar.speed) / player.inCar.topSpeed : 0);
@@ -133,7 +152,7 @@ if (shot) {
     drawWorld(ctx, world);
     if (statusEl) {
       statusEl.textContent =
-        '$' + player.cash + ' · ' + (world.missionIndex < 4 ? 'Job ' + (world.missionIndex + 1) + '/4' : 'Free Roam') +
+        '$' + player.cash + ' · ' + (world.missionIndex < MISSIONS.length ? 'Job ' + (world.missionIndex + 1) + '/' + MISSIONS.length : 'Free Roam') +
         ' · ' + world.wanted + '★ · ' + world.district;
     }
   }
@@ -146,5 +165,7 @@ function freshEvents() {
     crime: false, cash: 0, stepDone: false, missionStart: false,
     missionFailed: false, wantedDown: false, rammed: false, busted: false,
     punch: false, crash: false, pickup: false, enteredCar: false,
+    roadblock: false, roadblockBreak: false, hack: false, recruit: false,
+    pit: false, spike: false, launder: false, sidejob: false,
   };
 }

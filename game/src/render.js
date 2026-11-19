@@ -1,10 +1,34 @@
-// Canvas drawing for Vice Shores: the city, the cars and people in it, the
-// HUD, the minimap and the screens. Everything is drawn with plain canvas
-// shapes — no image, font or audio files anywhere in the game.
+// Canvas drawing for Vice Shores v5.1: the city, the cars and people in
+// it, the HUD, the minimap and the screens. Everything is drawn with plain
+// canvas shapes — no image, font or audio files anywhere in the game.
+//
+// v5.1 changes:
+// - Roadblock bars are drawn ACROSS the road (axis-aligned, no rotation),
+//   matching the collision box in dispatch.js. In v5 the bar was drawn
+//   rotated by the road angle, so it ran along the road while the
+//   collision box ran across it — the chase shot shows the bar standing
+//   between the two police cars instead of blocking the road. The
+//   "ROADBLOCK" label is now always horizontal and readable.
+// - Spike strips: a dark strip with teeth, drawn across the road like a
+//   barrier but flat and unguarded.
+// - Flares: orange smoke burning over fresh roadblocks.
+// - Notice boards: a wooden JOBS sign in every district, marking where
+//   the job board (B) lives in the world.
+// - The helicopter's spotlight is drawn as a beam from the helicopter to
+//   the player now that Air-1 hovers offset up-left — in v5 the heli sat
+//   directly overhead and the spotlight puddle covered the police cars.
+// - HUD: the crew badges list all four members, the hint line names G
+//   and B, the standing-change flash sits below the standing value
+//   instead of on top of it (v5 overlapped them), and the objective line
+//   shows a side job while one is running.
+// - Title screen: eight jobs, and the save line counts to eight.
 
 import { CFG } from './config.js';
 import { clamp } from './random.js';
-import { missionMarker, missionTitle, currentObjective } from './missions.js';
+import { missionMarker, missionTitle, currentObjective, MISSIONS } from './missions.js';
+import { CREW_ROLES, crewCost } from './crew.js';
+import { STANDING_DISTRICTS, standingOf, standingSummary, boardJobs, sideJobObjective } from './standing.js';
+import { noticeBoardAt } from './city.js';
 
 const VIEW_W = CFG.viewW;
 const VIEW_H = CFG.viewH;
@@ -22,10 +46,14 @@ export function drawWorld(ctx, world) {
   drawParkAndPlaza(ctx, world, ox, oy);
   drawBuildings(ctx, world, ox, oy);
   drawTrees(ctx, world, ox, oy);
+  drawNoticeBoards(ctx, world, ox, oy);
   drawMarker(ctx, world, ox, oy);
   drawCars(ctx, world, ox, oy);
   drawPeds(ctx, world, ox, oy);
   drawPlayer(ctx, world, ox, oy);
+  drawFlares(ctx, world, ox, oy);
+  drawRoadblocks(ctx, world, ox, oy);
+  drawHeli(ctx, world, ox, oy);
   ctx.restore();
 
   drawHUD(ctx, world);
@@ -180,6 +208,31 @@ function drawTrees(ctx, world, ox, oy) {
   }
 }
 
+// ---------------------------------------------------------------- notice boards (v5.1)
+
+function drawNoticeBoards(ctx, world, ox, oy) {
+  for (const b of world.city.boards) {
+    const x = b.x - ox;
+    const y = b.y - oy;
+    if (x < -50 || x > VIEW_W + 50 || y < -50 || y > VIEW_H + 50) continue;
+    // A wooden sign on a post: the job board lives here. The current
+    // district's board gets a gold frame so it reads at a glance.
+    const here = noticeBoardAt(world.city, world.district) === b;
+    ctx.fillStyle = '#6a4a2a';
+    ctx.fillRect(x - 2, y, 4, 16);
+    ctx.fillStyle = '#a87c4a';
+    ctx.fillRect(x - 19, y - 22, 38, 24);
+    ctx.strokeStyle = here ? '#ffd23c' : '#5a3a1a';
+    ctx.lineWidth = here ? 3 : 2;
+    ctx.strokeRect(x - 19, y - 22, 38, 24);
+    ctx.fillStyle = '#fff8e8';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('JOBS', x, y - 7);
+    ctx.textAlign = 'left';
+  }
+}
+
 // ---------------------------------------------------------------- marker
 
 function drawMarker(ctx, world, ox, oy) {
@@ -204,6 +257,135 @@ function drawMarker(ctx, world, ox, oy) {
   ctx.fill();
 }
 
+// ---------------------------------------------------------------- flares, roadblocks & helicopter (v5/v5.1)
+
+function drawFlares(ctx, world, ox, oy) {
+  for (const f of world.flares) {
+    const x = f.x - ox;
+    const y = f.y - oy;
+    if (x < -40 || x > VIEW_W + 40 || y < -40 || y > VIEW_H + 40) continue;
+    // Orange smoke rising from the road, flickering as it burns down.
+    const left = Math.max(0, f.until - world.time);
+    const alpha = Math.min(0.8, left / 2);
+    const r = 12 + Math.sin(world.time * 9 + f.x) * 3;
+    const grad = ctx.createRadialGradient(x, y, 2, x, y, r * 2.2);
+    grad.addColorStop(0, `rgba(255,122,42,${alpha})`);
+    grad.addColorStop(1, 'rgba(255,122,42,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffd23c';
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawRoadblocks(ctx, world, ox, oy) {
+  for (const rb of world.roadblocks) {
+    const x = rb.x - ox;
+    const y = rb.y - oy;
+    if (x < -120 || x > VIEW_W + 120 || y < -120 || y > VIEW_H + 120) continue;
+    // The bar lies ACROSS the road — a north-south road gets a horizontal
+    // bar, an east-west road a vertical one — exactly matching the solid
+    // box in dispatch.js. v5 rotated the bar by the road angle, so it
+    // ran along the road while the collision ran across it.
+    const horizontal = rb.angle !== 0;
+    if (rb.kind === 'spike') {
+      // A spike strip: a dark flat strip with teeth, no cars, no sign.
+      ctx.fillStyle = '#22242a';
+      if (horizontal) ctx.fillRect(x - 76, y - 6, 152, 12);
+      else ctx.fillRect(x - 6, y - 76, 12, 152);
+      ctx.fillStyle = CFG.colors.spike;
+      if (horizontal) {
+        for (let s = -70; s <= 70; s += 14) {
+          ctx.beginPath();
+          ctx.moveTo(x + s - 4, y - 6); ctx.lineTo(x + s, y + 6); ctx.lineTo(x + s + 4, y - 6);
+          ctx.closePath(); ctx.fill();
+        }
+      } else {
+        for (let s = -70; s <= 70; s += 14) {
+          ctx.beginPath();
+          ctx.moveTo(x - 6, y + s - 4); ctx.lineTo(x + 6, y + s); ctx.lineTo(x - 6, y + s + 4);
+          ctx.closePath(); ctx.fill();
+        }
+      }
+      continue;
+    }
+    // Striped barrier bar across the road, with a ROADBLOCK sign above it.
+    ctx.fillStyle = '#f2c230';
+    if (horizontal) ctx.fillRect(x - 76, y - 7, 152, 14);
+    else ctx.fillRect(x - 7, y - 76, 14, 152);
+    ctx.fillStyle = '#222';
+    if (horizontal) {
+      for (let s = -76; s < 76; s += 24) ctx.fillRect(x + s, y - 7, 12, 14);
+    } else {
+      for (let s = -76; s < 76; s += 24) ctx.fillRect(x - 7, y + s, 14, 12);
+    }
+    ctx.fillStyle = '#ff5040';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('ROADBLOCK', x, y - 14);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawHeli(ctx, world, ox, oy) {
+  const h = world.heli;
+  if (!h) return;
+  const p = world.player;
+  // Spotlight: a soft pool of light pinned on the player — and, since
+  // Air-1 now hovers offset up-left, a faint beam from the helicopter
+  // down to the pool, so the offset reads as a beam and not a mistake.
+  const px = p.x - ox;
+  const py = p.y - oy;
+  const hx = h.x - ox;
+  const hy = h.y - oy;
+  ctx.fillStyle = 'rgba(255,244,180,0.10)';
+  ctx.beginPath();
+  ctx.moveTo(hx - 14, hy + 6);
+  ctx.lineTo(hx + 14, hy + 6);
+  ctx.lineTo(px + 90, py);
+  ctx.lineTo(px - 90, py);
+  ctx.closePath();
+  ctx.fill();
+  const grad = ctx.createRadialGradient(px, py, 10, px, py, 210);
+  grad.addColorStop(0, 'rgba(255,244,180,0.42)');
+  grad.addColorStop(1, 'rgba(255,244,180,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(px, py, 210, 0, Math.PI * 2);
+  ctx.fill();
+  // The helicopter itself: a dark body with a spinning rotor and an
+  // AIR-1 label, big enough to read at a glance.
+  if (hx > -60 && hx < VIEW_W + 60 && hy > -60 && hy < VIEW_H + 60) {
+    ctx.save();
+    ctx.translate(hx, hy);
+    ctx.fillStyle = 'rgba(0,0,0,0.32)';
+    ctx.beginPath(); ctx.ellipse(4, 5, 24, 13, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#23232a';
+    ctx.beginPath(); ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ffd23c';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(0, 0, 22, 12, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 2.5;
+    const spin = world.time * 22;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(spin) * 34, Math.sin(spin) * 5);
+    ctx.lineTo(-Math.cos(spin) * 34, -Math.sin(spin) * 5);
+    ctx.stroke();
+    ctx.fillStyle = '#ffd23c';
+    ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('AIR-1', 0, 26);
+    ctx.restore();
+  }
+}
+
 // ---------------------------------------------------------------- cars
 
 function drawCars(ctx, world, ox, oy) {
@@ -221,14 +403,21 @@ function drawCar(ctx, car, ox, oy, isPlayer, time) {
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
   roundRect(ctx, -car.len / 2 + 3, -car.wid / 2 + 4, car.len, car.wid, 8);
   ctx.fill();
-  // Wheels.
+  // Wheels. A car with popped tyres (spike strip) shows flat rear wheels.
   ctx.fillStyle = '#1a1a1a';
   const wl = car.len * 0.28;
   const ww = 7;
   ctx.fillRect(-wl, -car.wid / 2 - 2, 14, ww);
   ctx.fillRect(wl - 4, -car.wid / 2 - 2, 14, ww);
-  ctx.fillRect(-wl, car.wid / 2 - 5, 14, ww);
-  ctx.fillRect(wl - 4, car.wid / 2 - 5, 14, ww);
+  if (car.tireTimer > 0) {
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(-wl, car.wid / 2 - 5, 14, ww + 3);
+    ctx.fillRect(wl - 4, car.wid / 2 - 5, 14, ww + 3);
+  } else {
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(-wl, car.wid / 2 - 5, 14, ww);
+    ctx.fillRect(wl - 4, car.wid / 2 - 5, 14, ww);
+  }
   // Body.
   ctx.fillStyle = car.color;
   roundRect(ctx, -car.len / 2, -car.wid / 2, car.len, car.wid, 8);
@@ -289,6 +478,16 @@ function roundRect(ctx, x, y, w, h, r) {
 function drawPeds(ctx, world, ox, oy) {
   for (const ped of world.peds) drawPerson(ctx, ped, ox, oy, false);
   for (const cop of world.footCops) drawPerson(ctx, cop, ox, oy, true);
+  // v5: recruited crew walk with Rico — a gold ring marks them as crew.
+  for (const c of world.companions) {
+    drawPerson(ctx, c, ox, oy, false);
+    const x = c.x - ox;
+    const y = c.y - oy;
+    if (x < -30 || x > VIEW_W + 30 || y < -30 || y > VIEW_H + 30) continue;
+    ctx.strokeStyle = '#ffd23c';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.stroke();
+  }
 }
 
 function drawPerson(ctx, p, ox, oy, isCop) {
@@ -376,7 +575,8 @@ function drawHUD(ctx, world) {
   if (world.screen === 'title') return;
   const player = world.player;
 
-  // Top-left: cash, mission, objective.
+  // Top-left: cash, mission, objective (a side job's objective while one
+  // is running — the story job waits until the side job is done).
   panel(ctx, 12, 12, 330, 74);
   ctx.fillStyle = '#ffd23c';
   ctx.font = 'bold 26px sans-serif';
@@ -388,7 +588,7 @@ function drawHUD(ctx, world) {
   ctx.fillText(missionTitle(world), 26, 64);
   ctx.fillStyle = '#d8d8d8';
   ctx.font = '13px sans-serif';
-  ctx.fillText(currentObjective(world), 26, 80);
+  ctx.fillText(world.sideJob ? sideJobObjective(world) : currentObjective(world), 26, 80);
 
   // Top-right: wanted stars.
   panel(ctx, VIEW_W - 232, 12, 220, 40);
@@ -398,12 +598,53 @@ function drawHUD(ctx, world) {
 
   // Minimap under the stars.
   drawMinimap(ctx, world, VIEW_W - 232, 60, 220, 165);
-  // District name under the minimap.
+  // District name under the minimap, with its standing bar (v5).
   ctx.fillStyle = '#ffffff';
   ctx.font = '13px sans-serif';
   ctx.textAlign = 'right';
   ctx.fillText(world.district, VIEW_W - 14, 244);
   ctx.textAlign = 'left';
+  const st = standingOf(world, world.district);
+  ctx.fillStyle = '#222';
+  ctx.fillRect(VIEW_W - 232, 250, 220, 8);
+  const mid = VIEW_W - 232 + 110;
+  ctx.fillStyle = st >= 0 ? '#5ac83c' : '#d03030';
+  if (st >= 0) ctx.fillRect(mid, 250, 110 * (st / 100), 8);
+  else ctx.fillRect(mid + 110 * (st / 100), 250, 110 * (-st / 100), 8);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(st >= 0 ? '+' + st : String(st), VIEW_W - 14, 272);
+  ctx.textAlign = 'left';
+  // Standing-change flash: its own line below the value, never on top of
+  // it — v5 drew both at the same height and they overlapped.
+  if (world.standingFlash) {
+    ctx.fillStyle = world.standingFlash.delta > 0 ? '#8ae08a' : '#ff9080';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText((world.standingFlash.delta > 0 ? '+' : '') + world.standingFlash.delta + ' ' + world.standingFlash.district, VIEW_W - 14, 292);
+    ctx.textAlign = 'left';
+  }
+
+  // Dispatch radio line (v5): what the PD is saying right now.
+  if (world.dispatch && world.dispatch.msg) {
+    ctx.font = '13px sans-serif';
+    const dw = Math.min(560, ctx.measureText(world.dispatch.msg).width + 32);
+    panel(ctx, (VIEW_W - dw) / 2, 12, dw, 28);
+    ctx.fillStyle = '#9ec8ff';
+    ctx.textAlign = 'center';
+    ctx.fillText(world.dispatch.msg, VIEW_W / 2, 31);
+    ctx.textAlign = 'left';
+  }
+
+  // Crew badges (v5/v5.1): who is on Rico's side, at a glance — four now.
+  const hired = CREW_ROLES.filter((r) => world.crew[r.id]);
+  if (hired.length) {
+    panel(ctx, 12, 94, 330, 26);
+    ctx.fillStyle = '#ffd23c';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText('CREW: ' + hired.map((r) => r.name.split(' ')[0]).join(' · '), 26, 112);
+  }
 
   // Bottom-left: health bar.
   panel(ctx, 12, VIEW_H - 52, 220, 40);
@@ -432,7 +673,7 @@ function drawHUD(ctx, world) {
   // Controls hint while on foot.
   if (!player.inCar && world.screen === 'play') {
     ctx.fillStyle = 'rgba(10,14,20,0.72)';
-    const hint = 'WASD move  ·  SHIFT run  ·  E enter car  ·  F punch  ·  P pause';
+    const hint = 'WASD move  ·  SHIFT run  ·  E enter car  ·  F punch  ·  C crew  ·  H hack  ·  G fixer  ·  B jobs  ·  V districts  ·  P pause';
     ctx.font = '13px sans-serif';
     const w = ctx.measureText(hint).width + 24;
     roundRect(ctx, (VIEW_W - w) / 2, VIEW_H - 34, w, 26, 6);
@@ -454,13 +695,27 @@ function drawHUD(ctx, world) {
     ctx.textAlign = 'left';
   }
 
-  // Timed mission clock (the Package Run delivery).
-  if (world.missionIndex === 1 && world.missionStep === 1 && world.missionTimer > 0) {
-    const left = Math.max(0, 75 - world.missionTimer);
+  // Timed mission clock (the Package Run / Silent Partner delivery).
+  const mission = MISSIONS[world.missionIndex];
+  const timedStep = mission && mission.steps[world.missionStep];
+  if (timedStep && timedStep.timed && world.missionTimer > 0) {
+    const left = Math.max(0, timedStep.timed - world.missionTimer);
     ctx.fillStyle = left < 15 ? '#ff5040' : '#ffffff';
     ctx.font = 'bold 22px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('TIME ' + left.toFixed(0) + 's', VIEW_W / 2, 120);
+    ctx.textAlign = 'left';
+  }
+
+  // Side-job clock, under the mission clock when both run (they never
+  // run together — a side job waits for the story job — but the line is
+  // cheap insurance for the panel's own timer).
+  if (world.sideJob && world.sideJob.timed) {
+    const left = Math.max(0, world.sideJob.timed - world.sideJob.timer);
+    ctx.fillStyle = left < 10 ? '#ff5040' : '#ffd23c';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('SIDE JOB ' + left.toFixed(0) + 's', VIEW_W / 2, 146);
     ctx.textAlign = 'left';
   }
 }
@@ -500,6 +755,11 @@ function drawMinimap(ctx, world, x, y, w, h) {
   for (const rx of CFG.roadXs) { ctx.moveTo(x + rx * sx, y); ctx.lineTo(x + rx * sx, y + h); }
   for (const ry of CFG.roadYs) { ctx.moveTo(x, y + ry * sy); ctx.lineTo(x + w, y + ry * sy); }
   ctx.stroke();
+  // v5.1: notice boards are brown dots — the job board is findable.
+  ctx.fillStyle = '#a87c4a';
+  for (const b of world.city.boards) {
+    ctx.fillRect(x + b.x * sx - 2, y + b.y * sy - 2, 4, 4);
+  }
   // Mission marker.
   const m = missionMarker(world);
   if (m) {
@@ -514,6 +774,20 @@ function drawMinimap(ctx, world, x, y, w, h) {
     ctx.beginPath();
     ctx.arc(x + car.x * sx, y + car.y * sy, 3.5, 0, Math.PI * 2);
     ctx.fill();
+  }
+  // v5: roadblocks are orange squares — and with Ivy the Lookout on the
+  // crew, the minimap also draws a ring showing how far she can see.
+  ctx.fillStyle = '#ff8c2a';
+  for (const rb of world.roadblocks) {
+    ctx.fillRect(x + rb.x * sx - 4, y + rb.y * sy - 4, 8, 8);
+  }
+  if (world.crew.lookout) {
+    const p0 = world.player;
+    ctx.strokeStyle = 'rgba(255,210,60,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(x + p0.x * sx, y + p0.y * sy, 400 * sx, 0, Math.PI * 2);
+    ctx.stroke();
   }
   // Player arrow.
   const p = world.player;
@@ -531,10 +805,126 @@ function drawMinimap(ctx, world, x, y, w, h) {
   ctx.restore();
 }
 
+// ---------------------------------------------------------------- overlays (v5/v5.1)
+
+function drawCrewPanel(ctx, world) {
+  ctx.fillStyle = 'rgba(8,10,16,0.72)';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  panel(ctx, (VIEW_W - 760) / 2, 60, 760, 580);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd23c';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.fillText('YOUR CREW', VIEW_W / 2, 118);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('Hire once, keep them for the game. Your cash: $' + world.player.cash.toLocaleString('en-US'), VIEW_W / 2, 148);
+  ctx.textAlign = 'left';
+  CREW_ROLES.forEach((role, i) => {
+    const y = 180 + i * 104;
+    const hired = !!world.crew[role.id];
+    const cost = crewCost(world, role);
+    panel(ctx, (VIEW_W - 700) / 2, y, 700, 92);
+    ctx.fillStyle = hired ? '#5ac83c' : '#ffd23c';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText((i + 1) + '. ' + role.name + (hired ? '  —  HIRED' : '  —  $' + cost), (VIEW_W - 700) / 2 + 24, y + 34);
+    ctx.fillStyle = '#d8d8d8';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(role.blurb, (VIEW_W - 700) / 2 + 24, y + 62);
+    if (!hired && world.player.cash < cost) {
+      ctx.fillStyle = '#ff9080';
+      ctx.fillText('Not enough cash yet.', (VIEW_W - 700) / 2 + 24, y + 84);
+    }
+  });
+  ctx.fillStyle = '#d8d8d8';
+  ctx.font = '15px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Press 1 / 2 / 3 / 4 to hire, C to close. Standing in your district makes hiring cheaper.', VIEW_W / 2, 616);
+  ctx.textAlign = 'left';
+}
+
+function drawDistrictPanel(ctx, world) {
+  ctx.fillStyle = 'rgba(8,10,16,0.72)';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  panel(ctx, (VIEW_W - 760) / 2, 70, 760, 540);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd23c';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.fillText('DISTRICT STANDING', VIEW_W / 2, 128);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('Finish jobs to be loved. Commit crimes to be hated. Standing changes payouts and police response.', VIEW_W / 2, 158);
+  ctx.textAlign = 'left';
+  STANDING_DISTRICTS.forEach((d, i) => {
+    const y = 190 + i * 62;
+    const sum = standingSummary(world, d);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(d, (VIEW_W - 700) / 2 + 24, y + 22);
+    // Standing bar, -100..+100 around a centre line.
+    const bx = (VIEW_W - 700) / 2 + 240;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bx, y + 6, 220, 12);
+    ctx.fillStyle = sum.standing >= 0 ? '#5ac83c' : '#d03030';
+    if (sum.standing >= 0) ctx.fillRect(bx + 110, y + 6, 110 * (sum.standing / 100), 12);
+    else ctx.fillRect(bx + 110 + 110 * (sum.standing / 100), y + 6, 110 * (-sum.standing / 100), 12);
+    ctx.fillStyle = '#d8d8d8';
+    ctx.font = '14px sans-serif';
+    ctx.fillText((sum.standing >= 0 ? '+' : '') + sum.standing + '  ·  ' + d + ' ' + sum.mood + '  ·  payout ' + (sum.pay >= 0 ? '+' : '') + sum.pay + '%', bx + 240, y + 18);
+  });
+  ctx.fillStyle = '#d8d8d8';
+  ctx.font = '15px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Press V to close.', VIEW_W / 2, 586);
+  ctx.textAlign = 'left';
+}
+
+// v5.1: the job board — side jobs for the district the player is standing
+// in. A board opens once the district likes Rico (+20 standing); until
+// then the jobs are listed but locked.
+function drawJobBoardPanel(ctx, world) {
+  const district = world.district;
+  const standing = standingOf(world, district);
+  const jobs = boardJobs(world, district);
+  const open = standing >= CFG.jobBoardStandingNeeded;
+  ctx.fillStyle = 'rgba(8,10,16,0.72)';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  panel(ctx, (VIEW_W - 760) / 2, 90, 760, 480);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd23c';
+  ctx.font = 'bold 34px sans-serif';
+  ctx.fillText('JOB BOARD — ' + district.toUpperCase(), VIEW_W / 2, 148);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px sans-serif';
+  ctx.fillText(open
+    ? 'Side work for a district that knows you. One job at a time — finish it for cash and standing.'
+    : 'This district does not know you yet. Reach +' + CFG.jobBoardStandingNeeded + ' standing here to open its board (now ' + (standing >= 0 ? '+' : '') + standing + ').', VIEW_W / 2, 178);
+  ctx.textAlign = 'left';
+  jobs.forEach((job, i) => {
+    const y = 210 + i * 108;
+    panel(ctx, (VIEW_W - 700) / 2, y, 700, 92);
+    ctx.fillStyle = open ? '#ffd23c' : '#8a8f98';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText((i + 1) + '. ' + job.name + (open ? '  —  $' + job.payout : '  —  LOCKED'), (VIEW_W - 700) / 2 + 24, y + 34);
+    ctx.fillStyle = '#d8d8d8';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(job.text, (VIEW_W - 700) / 2 + 24, y + 62);
+    ctx.fillStyle = '#9ec8ff';
+    ctx.fillText('Deliver within ' + job.timed + 's  ·  +' + CFG.sideJobStandingGain + ' standing on completion', (VIEW_W - 700) / 2 + 24, y + 84);
+  });
+  ctx.fillStyle = '#d8d8d8';
+  ctx.font = '15px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(open ? 'Press 1 / 2 to take a job, B to close.' : 'Finish story jobs in this district to raise its standing, then come back.', VIEW_W / 2, 452);
+  ctx.textAlign = 'left';
+}
+
 // ---------------------------------------------------------------- screens
 
 function drawScreens(ctx, world) {
-  if (world.screen === 'play') return;
+  if (world.screen === 'play' && !world.overlay) return;
+  if (world.screen === 'play' && world.overlay === 'crew') return drawCrewPanel(ctx, world);
+  if (world.screen === 'play' && world.overlay === 'districts') return drawDistrictPanel(ctx, world);
+  if (world.screen === 'play' && world.overlay === 'jobs') return drawJobBoardPanel(ctx, world);
   ctx.fillStyle = 'rgba(8,10,16,0.55)';
   ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
@@ -551,15 +941,16 @@ function drawScreens(ctx, world) {
     ctx.fillText('Rico Vega is back in town. Mama Lou has work. The police have questions.', VIEW_W / 2, 326);
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 20px sans-serif';
-    ctx.fillText('Press ENTER to start', VIEW_W / 2, 420);
+    ctx.fillText('Press ENTER to start', VIEW_W / 2, 410);
     ctx.font = '15px sans-serif';
     ctx.fillStyle = '#d8d8d8';
-    ctx.fillText('WASD / arrows — move & drive   E — enter / exit car   F — punch   SHIFT — run   P — pause', VIEW_W / 2, 462);
-    ctx.fillText('Steal cars, run jobs for Mama Lou, and stay out of the Vice Shores PD.', VIEW_W / 2, 488);
+    ctx.fillText('WASD / arrows — move & drive   E — enter / exit car   F — punch   SHIFT — run   P — pause', VIEW_W / 2, 452);
+    ctx.fillText('C — hire a crew   H — hacker jam   G — fixer launder   B — job board   V — district standing', VIEW_W / 2, 478);
+    ctx.fillText('Steal cars, run eight jobs for Mama Lou, build your crew and your name in every district.', VIEW_W / 2, 504);
     if (world.hasSave) {
       ctx.fillStyle = '#ffd23c';
       ctx.font = 'bold 16px sans-serif';
-      ctx.fillText('Saved progress found — press ENTER to continue ($' + world.saveCash + ', job ' + (world.saveMission + 1) + ' of 4)', VIEW_W / 2, 540);
+      ctx.fillText('Saved progress found — press ENTER to continue ($' + world.saveCash + ', job ' + (world.saveMission + 1) + ' of 8)', VIEW_W / 2, 556);
     }
     ctx.textAlign = 'left';
     return;
