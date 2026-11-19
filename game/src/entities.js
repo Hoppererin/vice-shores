@@ -1,9 +1,25 @@
-// Everything that moves in Vice Shores, rewritten for v5.1: the player,
+// Everything that moves in Vice Shores, rewritten for v5.3: the player,
 // pedestrians, traffic cars and police cars. Each entity is a plain
 // object; each step function advances it by dt seconds using only the
 // world and the seeded RNG.
 //
-// v5.1 changes:
+// v5.3 changes:
+// - Stakeout cars: a police car can be parked with its lights off,
+//   waiting near a destination (police.js assigns the stakeout). A
+//   stakeout car does not chase until the player trips it — then it
+//   bursts out at full speed. The car carries a stakeout flag and a
+//   hold timer; stepPoliceCar owns the ambush, this module owns the car.
+// - District events change the traffic: during a street race the cars
+//   in the race district drive faster (everyone is in a hurry to watch),
+//   and during a blackout they drive slower, headlights on, because the
+//   street lights are out. Pedestrians gather toward the race district's
+//   centre while a race runs, and walk slower in a blackout.
+// - The getaway car: Dante the Wheelman's black sports car, the fastest
+//   thing in the city (top speed 700), spawned by the wheelman swap.
+// - Rolling roadblock cars carry a rolling flag so the chase never tries
+//   to drive them — dispatch owns them while they hold the lane.
+// - With Dante on the crew, every car runs a little faster on top of
+//   Mara's driver bonus (the two stack).
 // - Pedestrians keep to the sidewalks while the heat is on. In v5 they
 //   wandered onto the asphalt mid-chase and got run over, which raised
 //   the wanted level for no good reason — the chase shot itself caught a
@@ -18,7 +34,7 @@
 
 import { CFG, CAR_MODELS } from './config.js';
 import { angleDiff, chance, clamp, dist, pick, rand, randInt } from './random.js';
-import { collideBuildings, nearestNode, onRoad, randomRoadPoint, randomSidewalkPoint } from './city.js';
+import { collideBuildings, districtAt, nearestNode, onRoad, randomRoadPoint, randomSidewalkPoint, districtCenter } from './city.js';
 
 // ---------------------------------------------------------------- player
 
@@ -55,6 +71,10 @@ export function makeCar(kind, x, y, angle, model, rng) {
     topSpeed: baseTop,
     baseTopSpeed: baseTop, // v5: the driver's +12% scales this, never the scaled value
     block: false, // v5: true while a police car is holding a roadblock line
+    rolling: false, // v5.2: true while a police car is part of a rolling roadblock
+    getaway: false, // v5.2: true for Dante's black getaway car
+    stakeout: false, // v5.3: true while a police car is parked on a stakeout
+    stakeoutUntil: 0, // v5.3: the stakeout stands down after this world time
     driver: kind === 'traffic' || kind === 'taxi',
     node: -1, // current road-graph node (traffic only)
     next: -1, // node being driven to (traffic only)
@@ -70,8 +90,9 @@ function pickColor(kind, model, rng) {
   if (kind === 'police') return '#2a4a8a';
   if (kind === 'taxi') return '#f2c230';
   const colors = CAR_MODELS[model].colors;
-  const stream = rng || Math.random;
-  return colors[Math.floor(stream() * colors.length)];
+  // No fallback: every caller passes the world's seeded RNG, so the
+  // colour pick is deterministic — a seed always builds the same city.
+  return colors[Math.floor(rng() * colors.length)];
 }
 
 // The yellow mission taxi, parked by the plaza.
@@ -86,6 +107,31 @@ export function makeSportsCar(x, y, rng) {
   const car = makeCar('sports', x, y, Math.PI / 2, 'sports', rng);
   car.color = '#e8e8e8';
   car.driver = false;
+  return car;
+}
+
+// Dante the Wheelman's getaway car: a black sports car, the fastest thing
+// in Vice Shores. It spawns on the nearest road ahead of the player when
+// the wheelman swap is called, and Rico climbs straight into it.
+export function makeGetawayCar(x, y, rng) {
+  const car = makeCar('sports', x, y, 0, 'sports', rng);
+  car.color = '#1a1a1a';
+  car.driver = false;
+  car.getaway = true;
+  car.baseTopSpeed = CFG.getawayTopSpeed;
+  car.topSpeed = CFG.getawayTopSpeed;
+  return car;
+}
+
+// A stakeout car: a police car parked with its lights off near a
+// destination, waiting for the player. It does not move and does not
+// chase until police.js trips the ambush — then it is just a fast
+// police car with a burst of speed. The hold timer stands it down.
+export function makeStakeoutCar(world, x, y, angle) {
+  const car = makeCar('police', x, y, angle, 'police', world.rng);
+  car.speed = 0;
+  car.stakeout = true;
+  car.stakeoutUntil = world.time + CFG.stakeoutHoldSeconds;
   return car;
 }
 
@@ -158,6 +204,18 @@ export function spawnPeds(world) {
 
 // ---------------------------------------------------------------- traffic
 
+// The traffic speed multiplier for a district event: a street race makes
+// the cars in the race district hurry (everyone is late for the start
+// line), a blackout makes them crawl (the street lights are out and the
+// headlights are all anyone has).
+export function trafficEventFactor(world, x, y) {
+  const ev = world.districtEvent;
+  if (!ev || districtAt(x, y) !== ev.district) return 1;
+  if (ev.type === 'race') return 1.3;
+  if (ev.type === 'blackout') return 0.7;
+  return 1;
+}
+
 // Drive one traffic car along the road graph for dt seconds. A traffic
 // car that sees a roadblock barrier ahead on its lane stops and waits
 // instead of driving into the cordon — the PD's line is not a suggestion.
@@ -193,7 +251,7 @@ export function stepTrafficCar(world, car, dt) {
       if (ahead > 0 && ahead < 110 && side < 60) { blocked = true; break; }
     }
   }
-  const goal = blocked ? 0 : CFG.trafficSpeed;
+  const goal = blocked ? 0 : CFG.trafficSpeed * trafficEventFactor(world, car.x, car.y);
   car.speed += clamp(goal - car.speed, -260 * dt, 200 * dt);
 
   car.x += Math.cos(car.angle) * car.speed * dt;
@@ -216,6 +274,9 @@ export function stepTrafficCar(world, car, dt) {
 // themself on the asphalt heads for the nearest sidewalk instead of
 // ambling across the road — a chase down a road should not turn into a
 // wanted-level farm, and the chase screenshot stays clean.
+// v5.3: district events change the walk. During a street race, a
+// pedestrian in the race district drifts toward the district centre to
+// watch; during a blackout, everyone walks slower, feeling their way.
 export function stepPed(world, ped, dt) {
   if (ped.downTimer > 0) {
     ped.downTimer -= dt;
@@ -252,11 +313,26 @@ export function stepPed(world, ped, dt) {
     ped.target = nearestSidewalkExit(ped.x, ped.y);
   }
   if (!ped.target || dist(ped.x, ped.y, ped.target.x, ped.target.y) < 18) {
-    ped.target = randomSidewalkPoint(world.rng, world.city);
+    // A street race draws a crowd: a pedestrian in the race district
+    // heads for a sidewalk point near the district centre instead of a
+    // random one, so the race has spectators on the kerbs.
+    const ev = world.districtEvent;
+    if (ev && ev.type === 'race' && districtAt(ped.x, ped.y) === ev.district) {
+      const c = districtCenter(ev.district);
+      ped.target = {
+        x: clamp(c.x + rand(world.rng, -260, 260), 60, CFG.worldW - 60),
+        y: clamp(c.y + rand(world.rng, -260, 260), 60, CFG.worldH - 60),
+      };
+    } else {
+      ped.target = randomSidewalkPoint(world.rng, world.city);
+    }
   }
   const want = Math.atan2(ped.target.y - ped.y, ped.target.x - ped.x);
   ped.angle += clamp(angleDiff(ped.angle, want), -5 * dt, 5 * dt);
-  ped.speed = CFG.pedSpeed;
+  // A blackout slows the walk: nobody hurries in the dark.
+  const ev = world.districtEvent;
+  const slow = ev && ev.type === 'blackout' && districtAt(ped.x, ped.y) === ev.district ? 0.6 : 1;
+  ped.speed = CFG.pedSpeed * slow;
   ped.x += Math.cos(ped.angle) * ped.speed * dt;
   ped.y += Math.sin(ped.angle) * ped.speed * dt;
   ped.x = clamp(ped.x, 40, CFG.worldW - 40);
@@ -293,12 +369,18 @@ function nearestSidewalkExit(x, y) {
 // building hard, 'bump' for a light scrape, '' otherwise. With Mara the
 // Driver on the crew, the car runs faster and turns sharper (v5). With
 // popped tyres from a spike strip (v5.1), the top speed is crippled and
-// the steering goes soft until the timer wears off.
+// the steering goes soft until the timer wears off. With Dante the
+// Wheelman on the crew (v5.2), every car runs a little faster on top of
+// Mara's bonus — the two stack. A getaway car ignores the crew bonuses:
+// it is already the fastest thing in the city.
 export function stepDrivenCar(world, car, input, dt) {
   if (car.tireTimer > 0) car.tireTimer -= dt;
   const driver = world.crew && world.crew.driver;
+  const wheelman = world.crew && world.crew.wheelman;
   const tyres = car.tireTimer > 0 ? 0.55 : 1;
-  const top = car.baseTopSpeed * (driver ? CFG.driverTopBonus : 1) * tyres;
+  const top = car.getaway
+    ? car.baseTopSpeed * tyres
+    : car.baseTopSpeed * (driver ? CFG.driverTopBonus : 1) * (wheelman ? CFG.wheelmanTopBonus : 1) * tyres;
   car.topSpeed = top;
   if (input.up) car.speed += CFG.carAccel * dt;
   else if (input.down) {

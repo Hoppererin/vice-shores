@@ -1,11 +1,12 @@
-// Vice Shores v5.1 — boot, fixed-step loop, screens, save/load and the
+// Vice Shores v5.3 — boot, fixed-step loop, screens, save/load and the
 // ?shot= screenshot mode. The simulation itself lives in world.js; this
 // file only wires it to the canvas, the keyboard and localStorage.
 //
-// v5.1: eight story jobs in the status line and the title screen, sounds
-// for the PIT, the spike strip, the fixer's launder and the job board, and
-// the save round-trips the full four-person crew and the district
-// standing.
+// v5.3: twelve story jobs in the status line and the title screen, sounds
+// for the police scanner ping, Ivy's Spotter promotion, the district-event
+// sting and the stakeout alert, and the save round-trips the full
+// six-person crew (five hires plus the Spotter promotion) and the district
+// standing (turf is derived from standing, so it needs no slot).
 
 import { CFG } from './config.js';
 import { createWorld, stepWorld, saveSnapshot, retryAfterArrest, retryFailedMission } from './world.js';
@@ -34,7 +35,8 @@ function loadSave() {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (typeof data.cash !== 'number' || typeof data.missionIndex !== 'number') return null;
-    // v5/v5.1 saves carry the crew (all four) and the district standing.
+    // v5/v5.1/v5.2/v5.3 saves carry the crew (all six, counting the
+    // Spotter promotion) and the district standing.
     if (data.crew && typeof data.crew !== 'object') return null;
     if (data.standing && typeof data.standing !== 'object') return null;
     return data;
@@ -137,6 +139,16 @@ if (shot) {
     if (ev.spike) audio.spike();
     if (ev.launder) audio.launder();
     if (ev.sidejob) audio.sidejob();
+    if (ev.wheelman) audio.wheelman();
+    if (ev.lockdown) audio.lockdown();
+    if (ev.turf) audio.turf();
+    // v5.3: the scanner ping when the readout goes live, the Spotter
+    // chime on Ivy's promotion, the event sting when a district event
+    // starts, and the stakeout alert when an ambush trips.
+    if (ev.scanner) audio.scanner();
+    if (ev.spotter) audio.spotter();
+    if (ev.districtEvent) audio.event();
+    if (ev.stakeout) audio.stakeout();
     world.events = freshEvents();
     const player = world.player;
     audio.setEngine(player.inCar ? Math.abs(player.inCar.speed) / player.inCar.topSpeed : 0);
@@ -167,5 +179,7 @@ function freshEvents() {
     punch: false, crash: false, pickup: false, enteredCar: false,
     roadblock: false, roadblockBreak: false, hack: false, recruit: false,
     pit: false, spike: false, launder: false, sidejob: false,
+    wheelman: false, lockdown: false, turf: false,
+    spotter: false, districtEvent: false, stakeout: false, scanner: false,
   };
 }

@@ -7,6 +7,14 @@
 // v5.1 adds four sounds: the PIT spin (a low grinding whine), the spike
 // strip (a sharp metallic pop), the fixer's launder (a soft two-note
 // chime) and the job board (a paper-ish click as a side job pins up).
+// v5.2 adds three more: the wheelman swap (an engine rev and a chime as
+// the getaway car arrives), the lockdown alarm (a low two-tone warning),
+// and the turf flip (a deep drum as a district turns).
+// v5.3 adds four more: the police scanner ping (a sonar-like blip when
+// the scanner picks up a roadblock), the Spotter chime (a bright chime
+// when Ivy is promoted), the district-event sting (a rising arpeggio
+// when a race, raid or blackout starts), and the stakeout alert (a low
+// double-beep when a stakeout ambush trips).
 
 export function createAudio() {
   const stub = {
@@ -16,6 +24,10 @@ export function createAudio() {
     dispatch() {}, hack() {}, recruit() {},
     // v5.1: PIT spin, spike strip, fixer launder, job board pin.
     pit() {}, spike() {}, launder() {}, sidejob() {},
+    // v5.2: wheelman swap, lockdown alarm, turf flip.
+    wheelman() {}, lockdown() {}, turf() {},
+    // v5.3: scanner ping, Spotter promotion chime, event sting, stakeout alert.
+    scanner() {}, spotter() {}, event() {}, stakeout() {},
   };
   if (typeof window === 'undefined' || typeof window.AudioContext === 'undefined') {
     return stub; // Node / no audio: silent no-ops.
@@ -160,7 +172,45 @@ export function createAudio() {
       blip(523, 0.18, 'sine', 0.1);
       blip(1046, 0.24, 'sine', 0.1, 0.16);
     },
-    // v5.1: the job board — a paper-ish click as the side job pins up.
+    // v5.1: the job board — a paper-ish click as a side job pins up.
     sidejob() { blip(700, 0.08, 'triangle', 0.1, 0, 900); },
+    // v5.2: the wheelman swap — an engine rev climbing, then a chime as
+    // the getaway car pulls up beside you.
+    wheelman() {
+      blip(220, 0.3, 'sawtooth', 0.12, 0, 660);
+      blip(880, 0.14, 'triangle', 0.1, 0.3);
+      blip(1318, 0.2, 'triangle', 0.1, 0.42);
+    },
+    // v5.2: the lockdown alarm — a low two-tone warning, twice.
+    lockdown() {
+      blip(440, 0.18, 'square', 0.08);
+      blip(330, 0.18, 'square', 0.08, 0.2);
+      blip(440, 0.18, 'square', 0.08, 0.42);
+      blip(330, 0.18, 'square', 0.08, 0.62);
+    },
+    // v5.2: the turf flip — a deep drum as a district turns.
+    turf() { blip(90, 0.4, 'sine', 0.2, 0, 45); blip(70, 0.3, 'sine', 0.16, 0.25, 40); },
+    // v5.3: the scanner ping — a sonar-like blip when the scanner picks
+    // up a roadblock, high and clear so it cuts through the siren.
+    scanner() { blip(1568, 0.28, 'sine', 0.09, 0, 1568); blip(1568, 0.28, 'sine', 0.05, 0.3, 1568); },
+    // v5.3: the Spotter chime — a bright three-note chime, higher than
+    // the hire chime, when Ivy is promoted to Spotter.
+    spotter() {
+      blip(784, 0.12, 'triangle', 0.1);
+      blip(1046, 0.12, 'triangle', 0.1, 0.1);
+      blip(1568, 0.24, 'triangle', 0.1, 0.2);
+    },
+    // v5.3: the district-event sting — a rising arpeggio when a street
+    // race, a police raid or a blackout starts in a district.
+    event() {
+      [392, 523, 659, 784].forEach((f, i) => blip(f, 0.14, 'triangle', 0.09, i * 0.09));
+    },
+    // v5.3: the stakeout alert — a low double-beep when a stakeout
+    // ambush trips and the parked car comes alive.
+    stakeout() {
+      blip(220, 0.12, 'square', 0.1);
+      blip(220, 0.12, 'square', 0.1, 0.16);
+      blip(330, 0.2, 'square', 0.1, 0.34);
+    },
   };
 }

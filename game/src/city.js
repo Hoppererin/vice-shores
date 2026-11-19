@@ -1,16 +1,19 @@
-// The city of Vice Shores, rewritten for v5.1: a fixed road grid, blocks
+// The city of Vice Shores, rewritten for v5.3: a fixed road grid, blocks
 // of pastel buildings, a beach and ocean on the east edge, a park with a
 // pond, a plaza with a fountain, and the road graph the traffic drives
 // on. Everything is built from the world's seeded RNG, so a seed always
 // builds the same city.
 //
-// v5.1 adds the notice boards: one sign per district, standing on the
-// sidewalk, where the job board lives in the world. The board is drawn
-// by render.js; pressing B anywhere opens the current district's board,
-// and the boards give the player a place to look for work.
+// v5.2 changes: the building slots in a block are shuffled with the
+// seeded shuffle() helper now (the manual swap loop is gone), and there
+// is a districtRect() helper — the minimap draws the turf tint and the
+// lockdown ring over a district's rectangle, so the city hands it out.
+// v5.3 adds districtCenter() and randomDistrictName(): the district
+// events need a centre to gather around (the street-race crowd) and a
+// way to pick a district that is not already mid-event.
 
 import { CFG, NOTICE_BOARDS } from './config.js';
-import { chance, clamp, mulberry32, pick, rand, randInt } from './random.js';
+import { chance, clamp, mulberry32, pick, rand, randInt, shuffle } from './random.js';
 
 // Build the whole city for a seed (or a ready rng stream). Returns the city
 // object the world keeps.
@@ -77,15 +80,12 @@ function buildBlocks(city, rng) {
       if (Math.abs(cx - plaza.x) < 200 && Math.abs(cy - plaza.y) < 200) continue; // plaza
       if (chance(rng, 0.12)) continue; // empty lot: yard / parking patch
       const count = randInt(rng, 1, 4);
-      // 2x2 sub-grid slots inside the block, shuffled by the stream.
-      const slots = [
+      // 2x2 sub-grid slots inside the block, shuffled by the stream so
+      // the same seed always fills the same slots, in the same order.
+      const slots = shuffle(rng, [
         [x0 + 8, y0 + 8], [x1 - 8, y0 + 8],
         [x0 + 8, y1 - 8], [x1 - 8, y1 - 8],
-      ];
-      for (let s = slots.length - 1; s > 0; s--) {
-        const k = Math.floor(rng() * (s + 1));
-        [slots[s], slots[k]] = [slots[k], slots[s]];
-      }
+      ]);
       for (let n = 0; n < count; n++) {
         const [ax, ay] = slots[n];
         const w = rand(rng, 72, 108);
@@ -222,6 +222,32 @@ export function districtAt(x, y) {
     if (d.test(x, y)) return d.name;
   }
   return 'Vice Shores';
+}
+
+// The rectangle of a district on the map, or null for places with no
+// rectangle (Ocean is the whole east edge, drawn as its own strip).
+// The minimap uses this for the turf tint and the lockdown ring.
+export function districtRect(name) {
+  return CFG.districtRects[name] || null;
+}
+
+// The centre of a district, for district events: the street-race crowd
+// gathers near it, and the event banner names the district around it.
+// Falls back to the middle of the map for places with no centre.
+export function districtCenter(name) {
+  const c = CFG.districtCentres[name];
+  if (c) return { x: c.x, y: c.y };
+  return { x: CFG.worldW / 2, y: CFG.worldH / 2 };
+}
+
+// A random district name from the six standing districts, excluding any
+// in the skip list. The district-event scheduler uses this so an event
+// never lands on a district that is already mid-event.
+export function randomDistrictName(rng, skip = []) {
+  const names = ['Porto Verde', 'Old Town', 'Neon Mile', 'Marina Bay', 'Palm Court', 'Vice Beach'];
+  const open = names.filter((n) => !skip.includes(n));
+  if (!open.length) return null;
+  return pick(rng, open);
 }
 
 // The notice board of a district, or null. The job board panel opens for
