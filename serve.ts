@@ -2,8 +2,10 @@
 // locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
 // It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
 // does nothing clever: this is a development convenience, not a web server for the internet.
-// v5.1 note: the game is plain ES modules under game/src/ — no build step, no bundler, and the
+// v5.3 note: the game is plain ES modules under game/src/ — no build step, no bundler, and the
 // server never rewrites a path, so what you open is exactly what the grader's dossier holds.
+// The v5.3 game adds the wanted heat meter, the police scanner, Ivy's Spotter promotion,
+// district events and the stakeout — all plain modules, all offline.
 // Pass --port <n> to serve on another port: `node serve.ts --port 8090`.
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';

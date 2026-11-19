@@ -1,18 +1,1 @@
-[
-  {
-    "name": "1-chase.png",
-    "query": "?shot=chase&seed=7"
-  },
-  {
-    "name": "2-drive.png",
-    "query": "?shot=drive&seed=7"
-  },
-  {
-    "name": "3-street.png",
-    "query": "?shot=street&seed=7"
-  },
-  {
-    "name": "4-start.png",
-    "query": "?shot=start&seed=7"
-  }
-]
+[{"label":"Mission 3 getaway at 3 stars — sports car, two police chasers, Air-1 and a roadblock ahead","name":"1-chase.png","query":"?shot=chase&seed=7"},{"label":"Mission 1 — Rico driving the yellow taxi north to the Neon Mile club","name":"2-drive.png","query":"?shot=drive&seed=7"},{"label":"Free roam on foot on the beach promenade with four crew companions","name":"3-street.png","query":"?shot=street&seed=7"},{"label":"Title screen over the living city","name":"4-start.png","query":"?shot=start&seed=7"}]

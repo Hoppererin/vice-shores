@@ -1,12 +1,16 @@
-// Vice Shores v5.1 — a gta6-01 entry (Node 22, standard library only): the game is this directory's
+// Vice Shores v5.3 — a gta6-01 entry (Node 22, standard library only): the game is this directory's
 // game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
 // modules, no library and no network request), and the program hands it in. It copies game/ and
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game itself is Vice Shores, an original
 // top-down open-world crime game: Rico Vega drives, steals cars, dodges the Vice Shores PD and
-// runs eight jobs for Mama Lou across a 3200x2400 coastal city, with a wanted system, police
-// dispatch roadblocks (barriers and spike strips) and a helicopter, a hireable crew of four
-// (driver, hacker, lookout, fixer), district standing that changes payouts and police response,
+// runs twelve jobs for Mama Lou across a 3200x2400 coastal city, with a wanted system, a wanted
+// heat meter that lives between jobs, a police scanner that reveals roadblocks, police
+// dispatch roadblocks (barriers, spike strips and rolling roadblocks), two helicopters, stakeout
+// cars that wait at a job's destination, and a five-star lockdown, a hireable crew of six
+// (driver, hacker, lookout, fixer, wheelman, and Ivy promoted to Spotter who marks every police
+// car live), district standing and a turf war that changes payouts and police response, district
+// events (street races, police raids, blackouts) that change payouts and police presence,
 // district job boards with timed side jobs, traffic, pedestrians, a beach, a park and
 // a plaza, synthesized WebAudio sound and four deterministic ?shot= screenshot scenes. Put your
 // 3 or 4 PNG or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
