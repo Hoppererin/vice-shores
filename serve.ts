@@ -2,6 +2,9 @@
 // locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
 // It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
 // does nothing clever: this is a development convenience, not a web server for the internet.
+// v5.1 note: the game is plain ES modules under game/src/ — no build step, no bundler, and the
+// server never rewrites a path, so what you open is exactly what the grader's dossier holds.
+// Pass --port <n> to serve on another port: `node serve.ts --port 8090`.
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';

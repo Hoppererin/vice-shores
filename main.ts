@@ -1,13 +1,18 @@
-// Vice Shores — a gta6-01 entry (Node 22, standard library only): the game is this directory's
+// Vice Shores v5.1 — a gta6-01 entry (Node 22, standard library only): the game is this directory's
 // game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
 // modules, no library and no network request), and the program hands it in. It copies game/ and
 // screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library. The game itself is Vice Shores, an original
 // top-down open-world crime game: Rico Vega drives, steals cars, dodges the Vice Shores PD and
-// runs four jobs for Mama Lou across a 3200x2400 coastal city, with a wanted system, traffic,
-// pedestrians, a beach, a park and a plaza, synthesized WebAudio sound and four deterministic
-// ?shot= screenshot scenes. Put your 3 or 4 PNG or JPEG screenshots in screenshots/ (the first
-// by name is the cover) and run it.
+// runs eight jobs for Mama Lou across a 3200x2400 coastal city, with a wanted system, police
+// dispatch roadblocks (barriers and spike strips) and a helicopter, a hireable crew of four
+// (driver, hacker, lookout, fixer), district standing that changes payouts and police response,
+// district job boards with timed side jobs, traffic, pedestrians, a beach, a park and
+// a plaza, synthesized WebAudio sound and four deterministic ?shot= screenshot scenes. Put your
+// 3 or 4 PNG or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
+//
+// The program only ever copies files into /output — it never deletes the output directory
+// itself, because in the grader /output is a mount point and deleting it fails the run.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
